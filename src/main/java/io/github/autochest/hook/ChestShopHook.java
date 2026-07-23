@@ -18,6 +18,9 @@ public class ChestShopHook implements ContainerAccessPolicy {
     /** Hook 名称 */
     private static final String HOOK_NAME = "ChestShop";
 
+    /** 是否已安装（插件存在于服务器） */
+    private boolean installed = false;
+
     /** 是否成功初始化 */
     private boolean available = false;
 
@@ -34,6 +37,7 @@ public class ChestShopHook implements ContainerAccessPolicy {
             // ChestShop 未安装，静默跳过
             return;
         }
+        installed = true;
         try {
             // 通过反射获取 ChestShop 的商店识别方法，隔离具体 API 依赖
             Class<?> shopClass = Class.forName("com.Acrobot.ChestShop.Signs.ChestShopSign");
@@ -63,6 +67,11 @@ public class ChestShopHook implements ContainerAccessPolicy {
             }
         }
         return true;
+    }
+
+    @Override
+    public boolean isInstalled() {
+        return installed;
     }
 
     @Override

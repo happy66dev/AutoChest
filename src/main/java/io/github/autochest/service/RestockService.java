@@ -5,7 +5,6 @@ import io.github.autochest.scan.CandidatePlanner.PlanResult;
 import io.github.autochest.scan.InventorySnapshotFactory.ContainerDto;
 import io.github.autochest.task.PlayerTask;
 import org.bukkit.Bukkit;
-import org.bukkit.World;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
@@ -61,24 +60,27 @@ public class RestockService {
             identities.add(dto.identity);
         }
 
-        processSlotsBudgeted(eligibleSlots, 0, identities, playerTask, whitelist,
+        processSlotsBudgeted(eligibleSlots, 0, 0, identities, playerTask, whitelist,
                 new RestockStats(), onDone);
     }
 
     /**
-     * 按预算逐槽位处理，超出预算则让出 tick 后继续
+     * 按预算逐槽位+容器处理，超出预算则让出 tick 后继续
+     * 预算以"容器事务数"为单位，每次 validate() 调用都计入预算
      *
-     * @param eligibleSlots 合格目标槽位列表
-     * @param slotIndex     当前处理到第几个槽位
-     * @param identities    容器列表
-     * @param playerTask    玩家任务
-     * @param whitelist     目标槽位白名单
-     * @param stats         统计数据
-     * @param onDone        完成回调
+     * @param eligibleSlots   合格目标槽位列表
+     * @param slotIndex       当前处理到第几个槽位
+     * @param containerIndex  当前槽位处理到第几个容器
+     * @param identities      容器列表
+     * @param playerTask      玩家任务
+     * @param whitelist       目标槽位白名单
+     * @param stats           统计数据
+     * @param onDone          完成回调
      */
     private void processSlotsBudgeted(
             List<Integer> eligibleSlots,
             int slotIndex,
+            int containerIndex,
             List<ContainerIdentity> identities,
             PlayerTask playerTask,
             RestockTargetWhitelist whitelist,
@@ -92,120 +94,88 @@ public class RestockService {
             return;
         }
 
-        World world = player.getWorld();
         int containersPerTick = playerTask.getConfigSnapshot().getSubmitContainersPerTick();
         long nanosPerTick = playerTask.getConfigSnapshot().getSubmitNanosPerTick();
         long tickStart = System.nanoTime();
         int processed = 0;
 
-        int i = slotIndex;
-        while (i < eligibleSlots.size()) {
-            // 每处理 containersPerTick 个槽位或超时则让出 tick
-            if (processed >= containersPerTick || System.nanoTime() - tickStart >= nanosPerTick) {
-                final int nextSlotIndex = i;
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    Player fp = Bukkit.getPlayer(playerTask.getPlayerUuid());
-                    if (fp == null || !fp.isOnline() || fp.isDead()
-                            || !fp.getWorld().getUID().equals(playerTask.getWorldUuid())) {
-                        onDone.onCancelled();
-                        return;
-                    }
-                    processSlotsBudgeted(eligibleSlots, nextSlotIndex, identities,
-                            playerTask, whitelist, stats, onDone);
-                });
-                return;
-            }
+        int si = slotIndex;
+        while (si < eligibleSlots.size()) {
+            int playerSlot = eligibleSlots.get(si);
 
-            int playerSlot = eligibleSlots.get(i);
-
-            // 实时检查槽位资格（仍需与白名单快照 isSimilar）
+            // 实时检查槽位资格
             ItemStack currentItem = ContainerTransaction.cloneOrNull(player.getInventory().getItem(playerSlot));
             if (!whitelist.isEligible(playerSlot, currentItem)) {
-                // 槽位已失效，跳过
-                i++;
-                processed++;
+                si++;
+                containerIndex = 0;
                 continue;
             }
 
             int needed = currentItem.getMaxStackSize() - currentItem.getAmount();
             if (needed <= 0) {
-                // 已满，跳过
-                i++;
-                processed++;
+                si++;
+                containerIndex = 0;
                 continue;
             }
 
-            // 从容器列表取物品补充到该槽位
-            needed = restockFromContainers(player, world, playerSlot, currentItem, needed,
-                    identities, playerTask, stats);
+            // 从当前 containerIndex 开始遍历容器，每个容器都计入预算
+            int ci = containerIndex;
+            while (ci < identities.size() && needed > 0) {
+                // 预算检查（在容器事务之间）
+                if (processed >= containersPerTick || System.nanoTime() - tickStart >= nanosPerTick) {
+                    final int nextSi = si;
+                    final int nextCi = ci;
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        Player fp = Bukkit.getPlayer(playerTask.getPlayerUuid());
+                        if (fp == null || !fp.isOnline() || fp.isDead()
+                                || !fp.getWorld().getUID().equals(playerTask.getWorldUuid())) {
+                            onDone.onCancelled();
+                            return;
+                        }
+                        processSlotsBudgeted(eligibleSlots, nextSi, nextCi, identities,
+                                playerTask, whitelist, stats, onDone);
+                    });
+                    return;
+                }
 
-            i++;
-            processed++;
+                ContainerIdentity identity = identities.get(ci);
+                ContainerTransaction.ValidationResult vr = transaction.validate(playerTask, identity);
+                processed++;
+
+                if (vr.isValid()) {
+                    Inventory containerInv = vr.inventory;
+                    for (int containerSlot = 0; containerSlot < containerInv.getSize() && needed > 0; containerSlot++) {
+                        ItemStack containerItem = ContainerTransaction.cloneOrNull(containerInv.getItem(containerSlot));
+                        if (containerItem == null || !containerItem.isSimilar(currentItem)) {
+                            continue;
+                        }
+                        int canMove = Math.min(needed, containerItem.getAmount());
+                        if (canMove <= 0) continue;
+                        // 重新读取玩家实时槽位用于提交
+                        if (transaction.commitRestock(player, containerInv, playerSlot, containerSlot, canMove)) {
+                            needed -= canMove;
+                            stats.itemsMoved += canMove;
+                            stats.containersUsed++;
+                            // 更新 currentItem 数量以便后续判断
+                            currentItem = ContainerTransaction.cloneOrNull(player.getInventory().getItem(playerSlot));
+                            if (currentItem == null) {
+                                needed = 0;
+                            }
+                        }
+                    }
+                } else {
+                    stats.skipped++;
+                }
+                ci++;
+            }
+
+            // 该槽位处理完毕，移到下一槽
+            si++;
+            containerIndex = 0;
         }
 
         // 所有槽位处理完毕
         onDone.onComplete(stats);
-    }
-
-    /**
-     * 从候选容器中取物品补充到玩家指定槽位
-     *
-     * @param player     玩家
-     * @param world      世界
-     * @param playerSlot 玩家目标槽位
-     * @param playerItem 玩家物品快照
-     * @param needed     还需补充的数量
-     * @param identities 容器列表（按距离排序）
-     * @param playerTask 玩家任务
-     * @param stats      统计数据
-     * @return 剩余未满数量（0 表示已补满）
-     */
-    private int restockFromContainers(Player player, World world, int playerSlot,
-                                       ItemStack playerItem, int needed,
-                                       List<ContainerIdentity> identities,
-                                       PlayerTask playerTask, RestockStats stats) {
-        for (ContainerIdentity identity : identities) {
-            if (needed <= 0) {
-                break;
-            }
-
-            // 验证容器
-            ContainerTransaction.ValidationResult vr = transaction.validate(playerTask, identity);
-            if (!vr.isValid()) {
-                stats.skipped++;
-                continue;
-            }
-
-            Inventory containerInv = vr.inventory;
-
-            // 从容器中寻找相似物品槽位
-            for (int containerSlot = 0; containerSlot < containerInv.getSize(); containerSlot++) {
-                if (needed <= 0) {
-                    break;
-                }
-                ItemStack containerItem = ContainerTransaction.cloneOrNull(containerInv.getItem(containerSlot));
-                if (containerItem == null) {
-                    continue;
-                }
-                // 使用实时 isSimilar 验证
-                if (!containerItem.isSimilar(playerItem)) {
-                    continue;
-                }
-
-                int canMove = Math.min(needed, containerItem.getAmount());
-                if (canMove <= 0) {
-                    continue;
-                }
-
-                boolean ok = transaction.commitRestock(player, containerInv, playerSlot, containerSlot, canMove);
-                if (ok) {
-                    needed -= canMove;
-                    stats.itemsMoved += canMove;
-                    stats.containersUsed++;
-                }
-            }
-        }
-        return needed;
     }
 
     /** 补货统计数据 */

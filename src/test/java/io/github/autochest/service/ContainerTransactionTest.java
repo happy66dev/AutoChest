@@ -32,6 +32,7 @@ class ContainerTransactionTest {
         registry = mock(PlayerTaskRegistry.class);
         ContainerAccessPolicy allowAll = new ContainerAccessPolicy() {
             public boolean canAccess(Player player, Block... blocks) { return true; }
+            public boolean isInstalled() { return true; }
             public boolean isAvailable() { return true; }
             public String hookName() { return "TestPolicy"; }
         };

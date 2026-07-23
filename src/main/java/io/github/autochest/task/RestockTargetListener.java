@@ -9,7 +9,6 @@ import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
-import org.bukkit.inventory.PlayerInventory;
 
 import java.util.Map;
 import java.util.Set;
@@ -87,9 +86,8 @@ public class RestockTargetListener implements Listener {
         if (!registry.hasActiveTask(uuid) || !invalidatedSlots.containsKey(uuid)) {
             return;
         }
-        // 标记被点击的原始槽位和 shift-click 可能影响的当前槽位
+        // 只传入 rawSlot，由 markPlayerSlot 负责换算为玩家背包槽位
         markPlayerSlot(uuid, event.getRawSlot(), player);
-        markPlayerSlot(uuid, event.getSlot(), player);
     }
 
     /**
@@ -124,8 +122,12 @@ public class RestockTargetListener implements Listener {
         if (!registry.hasActiveTask(uuid) || !invalidatedSlots.containsKey(uuid)) {
             return;
         }
-        // 丢弃时手持槽即受影响
-        markPlayerSlot(uuid, player.getInventory().getHeldItemSlot(), player);
+        // 丢弃时手持槽（快捷栏 0..8）直接标记失效
+        int heldSlot = player.getInventory().getHeldItemSlot();
+        Set<Integer> slots = invalidatedSlots.get(uuid);
+        if (slots != null) {
+            slots.add(heldSlot);
+        }
     }
 
     /**
@@ -152,25 +154,49 @@ public class RestockTargetListener implements Listener {
     }
 
     /**
-     * 将指定槽位标记为玩家背包失效槽（只处理背包范围内的槽位）
+     * 将 rawSlot 转换为玩家背包槽位后标记失效
+     * rawSlot 是整个库存视图的全局索引，玩家背包在视图底部从 topInventorySize 开始
+     * 需要减去顶部容器大小才能得到真正的玩家背包槽位（0..35）
      *
-     * @param uuid   玩家 UUID
-     * @param slot   原始槽位编号
-     * @param player 玩家对象，用于判断槽位是否在背包范围内
+     * @param uuid    玩家 UUID
+     * @param rawSlot InventoryEvent 中的 rawSlot
+     * @param player  玩家对象
      */
-    private void markPlayerSlot(UUID uuid, int slot, Player player) {
-        // 只追踪背包 0..35 范围内的槽位
-        if (slot < 0 || slot > 35) {
+    private void markPlayerSlot(UUID uuid, int rawSlot, Player player) {
+        org.bukkit.inventory.InventoryView view = player.getOpenInventory();
+        int topSize = view.getTopInventory().getSize();
+
+        // rawSlot 在顶部容器范围内，不是玩家背包槽位
+        if (rawSlot < topSize) {
             return;
         }
-        // 确认是玩家主库存（非其他容器的槽位）
-        if (!(player.getOpenInventory().getTopInventory() instanceof PlayerInventory)
-                && slot < player.getOpenInventory().getTopInventory().getSize()) {
+
+        // 换算为玩家背包本地槽位
+        int playerSlot = rawSlot - topSize;
+
+        // 玩家背包视图中 0..26 = 主背包，27..35 = 快捷栏
+        // 对应 PlayerInventory 的实际槽位：9..35（主背包）和 0..8（快捷栏）
+        // Bukkit 的 InventoryView 中玩家背包部分布局：行0..2=主背包(9..35)，行3=快捷栏(0..8)
+        int inventorySlot;
+        if (playerSlot < 27) {
+            // 主背包 row 0..2 对应 PlayerInventory 的槽位 9..35
+            inventorySlot = playerSlot + 9;
+        } else if (playerSlot < 36) {
+            // 快捷栏 row 3 对应 PlayerInventory 的槽位 0..8
+            inventorySlot = playerSlot - 27;
+        } else {
+            // 超出范围（盔甲/副手等），不追踪
             return;
         }
+
+        // 确认在 0..35 范围内
+        if (inventorySlot < 0 || inventorySlot > 35) {
+            return;
+        }
+
         Set<Integer> slots = invalidatedSlots.get(uuid);
         if (slots != null) {
-            slots.add(slot);
+            slots.add(inventorySlot);
         }
     }
 }

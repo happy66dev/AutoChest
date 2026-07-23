@@ -23,6 +23,16 @@ public class MessageService {
     }
 
     /**
+     * 发送权限不足提示，并播放拒绝音效
+     *
+     * @param player 接收消息的玩家
+     */
+    public void sendNoPermission(Player player) {
+        send(player, "&c你没有执行此操作的权限喵~");
+        playSound(player, cfg.getSoundDenied());
+    }
+
+    /**
      * 发送"正在扫描附近容器"提示，并播放扫描开始音效
      *
      * @param player 接收消息的玩家

@@ -105,7 +105,8 @@ public class AutoChestPlugin extends JavaPlugin {
         AutoChestCommand commandHandler = new AutoChestCommand(
                 this, taskRegistry, cooldownService, accessPolicy,
                 executor, snapshotFactory, candidatePlanner,
-                depositService, restockService, restockListener
+                depositService, restockService, restockListener,
+                containerTransaction
         );
         getCommand("autochest").setExecutor(commandHandler);
         getCommand("autochest").setTabCompleter(commandHandler);

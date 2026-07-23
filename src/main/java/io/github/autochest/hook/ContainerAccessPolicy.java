@@ -21,10 +21,19 @@ public interface ContainerAccessPolicy {
     boolean canAccess(Player player, Block... blocks);
 
     /**
-     * 判断此 Hook 是否可用
-     * 插件未安装时返回 false；已安装但初始化失败时也返回 false
+     * 判断对应插件是否已安装在服务器上
+     * 未安装时 Hook 静默跳过，不参与任何策略检查
      *
-     * @return true 表示可用
+     * @return true 表示插件已安装
+     */
+    boolean isInstalled();
+
+    /**
+     * 判断此 Hook 是否可用（已安装且初始化成功）
+     * 插件未安装时返回 false；已安装但初始化失败时也返回 false
+     * 调用前应先检查 isInstalled()：未安装时 isAvailable() 无意义
+     *
+     * @return true 表示插件已安装且 Hook 初始化成功
      */
     boolean isAvailable();
 

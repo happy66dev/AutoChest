@@ -42,6 +42,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
     private final DepositService depositService;
     private final RestockService restockService;
     private final RestockTargetListener restockListener;
+    /** 共享的容器事务执行器，供快照阶段和提交阶段复用 */
+    private final ContainerTransaction containerTransaction;
 
     /** 活跃的扫描 BukkitTask，UUID → BukkitTask；用于插件禁用时取消 */
     private final Map<UUID, BukkitTask> activeScanTasks = new HashMap<>();
@@ -49,16 +51,17 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
     /**
      * 创建命令处理器
      *
-     * @param plugin          插件主类
-     * @param registry        任务注册表
-     * @param cooldownService 冷却服务
-     * @param accessPolicy    容器访问策略
-     * @param executor        异步线程池
-     * @param snapshotFactory 库存快照工厂
-     * @param planner         候选规划器
-     * @param depositService  存入服务
-     * @param restockService  补货服务
-     * @param restockListener restock 槽位监听器
+     * @param plugin               插件主类
+     * @param registry             任务注册表
+     * @param cooldownService      冷却服务
+     * @param accessPolicy         容器访问策略
+     * @param executor             异步线程池
+     * @param snapshotFactory      库存快照工厂
+     * @param planner              候选规划器
+     * @param depositService       存入服务
+     * @param restockService       补货服务
+     * @param restockListener      restock 槽位监听器
+     * @param containerTransaction 共享的容器事务执行器
      */
     public AutoChestCommand(
             AutoChestPlugin plugin,
@@ -70,7 +73,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
             CandidatePlanner planner,
             DepositService depositService,
             RestockService restockService,
-            RestockTargetListener restockListener
+            RestockTargetListener restockListener,
+            ContainerTransaction containerTransaction
     ) {
         this.plugin = plugin;
         this.registry = registry;
@@ -81,6 +85,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         this.depositService = depositService;
         this.restockService = restockService;
         this.restockListener = restockListener;
+        this.containerTransaction = containerTransaction;
     }
 
     @Override
@@ -133,7 +138,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
 
         // 权限检查
         if (!player.hasPermission("autochest.deposit")) {
-            messages.sendHookUnavailable(player, "autochest.deposit");
+            messages.sendNoPermission(player);
             return;
         }
 
@@ -201,7 +206,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         MessageService messages = plugin.getMessageService();
 
         if (!player.hasPermission("autochest.restock")) {
-            messages.sendHookUnavailable(player, "autochest.restock");
+            messages.sendNoPermission(player);
             return;
         }
 
@@ -522,7 +527,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
     }
 
     /**
-     * 安全获取容器库存，区块未加载或容器失效时返回 null
+     * 安全获取容器库存（仅验证区块和容器结构），区块未加载或容器失效时返回 null
+     * 快照阶段无需再次执行 Hook 检查，提交阶段的 validate() 会完整重验
      *
      * @param identity 容器身份
      * @param world    世界
@@ -531,9 +537,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
     private org.bukkit.inventory.Inventory getInventorySafely(ContainerIdentity identity,
                                                                org.bukkit.World world) {
         try {
-            ContainerTransaction tx = new ContainerTransaction(
-                    registry, accessPolicy, plugin.getLogger());
-            return tx.getInventoryIfValid(identity, world);
+            return containerTransaction.getInventoryIfValid(identity, world);
         } catch (Exception e) {
             return null;
         }

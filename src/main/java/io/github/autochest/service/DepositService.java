@@ -197,14 +197,13 @@ public class DepositService {
         // 验证玩家和容器
         ContainerTransaction.ValidationResult vr = transaction.validate(playerTask, identity);
         if (!vr.isValid()) {
-            if (vr.failureResult == ContainerTransaction.Result.FAILED_HOOK_UNAVAILABLE) {
-                // Hook 不可用：后续统计标记异常，由外层处理
-            }
             stats.skipped++;
             return;
         }
 
         Inventory containerInventory = vr.inventory;
+        // 记录本容器操作前的已移动数量，用于判断是否实际参与了本次操作
+        int itemsBeforeThisContainer = stats.itemsMoved;
 
         // 遍历玩家主背包 9..35 的每个非空槽位
         for (int playerSlot = 9; playerSlot <= 35; playerSlot++) {
@@ -224,8 +223,9 @@ public class DepositService {
             }
         }
 
-        if (stats.containersUsed < stats.skipped + 1) {
-            // 有实际写入时标记容器参与
+        // 仅当本容器实际移动了物品时才计为"参与容器"
+        if (stats.itemsMoved > itemsBeforeThisContainer) {
+            stats.containersUsed++;
         }
     }
 
@@ -267,8 +267,8 @@ public class DepositService {
 
             boolean ok = transaction.commitDeposit(player, containerInv, playerSlot, containerSlot, canMove);
             if (ok) {
+                // 只统计移动数量，容器参与数由 processOneContainer 统一计算
                 stats.itemsMoved += canMove;
-                stats.containersUsed++;
             }
         }
     }
@@ -303,8 +303,8 @@ public class DepositService {
 
             boolean ok = transaction.commitDeposit(player, containerInv, playerSlot, containerSlot, canMove);
             if (ok) {
+                // 只统计移动数量，容器参与数由 processOneContainer 统一计算
                 stats.itemsMoved += canMove;
-                stats.containersUsed++;
             }
         }
     }

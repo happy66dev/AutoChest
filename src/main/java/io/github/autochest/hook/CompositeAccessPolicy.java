@@ -39,16 +39,16 @@ public class CompositeAccessPolicy {
     }
 
     /**
-     * 检查是否有已安装但不可用的 Hook
-     * 用于任务创建前的整体检查；若有则应拒绝任务
+     * 检查是否有已安装但不可用（初始化失败）的 Hook
+     * 未安装的 Hook 不参与检查，不应触发拒绝
+     * 用于任务创建前的整体检查；返回非 null 时应拒绝新任务
      *
-     * @param installedPlugins 服务器已安装的插件列表（由主类提供）
-     * @return 不可用的 Hook 名称，若所有 Hook 均可用则返回 null
+     * @return 已安装但不可用的 Hook 名称，若无则返回 null
      */
     public String findUnavailableHook() {
         for (ContainerAccessPolicy policy : policies) {
-            // 若 Hook 注册了但不可用（初始化失败），则报告
-            if (!policy.isAvailable()) {
+            // 只有插件已安装但初始化失败时才报告，未安装则静默跳过
+            if (policy.isInstalled() && !policy.isAvailable()) {
                 return policy.hookName();
             }
         }
@@ -57,17 +57,21 @@ public class CompositeAccessPolicy {
 
     /**
      * 判断指定玩家是否可以访问给定容器
-     * 任一 Hook 拒绝则返回 false；已安装但不可用则抛出 HookUnavailableException
+     * 跳过未安装的 Hook；已安装但不可用则抛出 HookUnavailableException
      * 此方法必须在主线程调用
      *
      * @param player 执行操作的玩家
      * @param blocks 容器方块（单箱/木桶 1 个，双箱 2 个）
-     * @return true 表示所有 Hook 均允许访问
+     * @return true 表示所有已安装 Hook 均允许访问
      * @throws HookUnavailableException 若某个 Hook 已安装但不可用
      */
     public boolean canAccess(Player player, Block... blocks) {
         for (ContainerAccessPolicy policy : policies) {
-            // 喵~防御：Hook 不可用时拒绝整个任务而不是静默放行
+            // 未安装的 Hook 静默跳过，不参与检查
+            if (!policy.isInstalled()) {
+                continue;
+            }
+            // 已安装但不可用（初始化失败），拒绝整个任务
             if (!policy.isAvailable()) {
                 throw new HookUnavailableException(policy.hookName());
             }

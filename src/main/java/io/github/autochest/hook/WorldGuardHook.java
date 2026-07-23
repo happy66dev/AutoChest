@@ -18,6 +18,9 @@ public class WorldGuardHook implements ContainerAccessPolicy {
     /** Hook 名称，用于日志和消息 */
     private static final String HOOK_NAME = "WorldGuard";
 
+    /** 是否已安装（插件存在于服务器） */
+    private boolean installed = false;
+
     /** 是否成功初始化 */
     private boolean available = false;
 
@@ -35,6 +38,7 @@ public class WorldGuardHook implements ContainerAccessPolicy {
             // WorldGuard 未安装，静默不启用
             return;
         }
+        installed = true;
         try {
             regionChecker = new RegionChecker();
             available = true;
@@ -55,6 +59,11 @@ public class WorldGuardHook implements ContainerAccessPolicy {
             }
         }
         return true;
+    }
+
+    @Override
+    public boolean isInstalled() {
+        return installed;
     }
 
     @Override
