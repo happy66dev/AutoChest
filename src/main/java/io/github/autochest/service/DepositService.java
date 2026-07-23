@@ -2,8 +2,9 @@ package io.github.autochest.service;
 
 import io.github.autochest.container.ContainerIdentity;
 import io.github.autochest.scan.CandidatePlanner.PlanResult;
-import io.github.autochest.scan.InventorySnapshotFactory.ContainerDto;
+import io.github.autochest.scan.InventorySnapshotFactory;
 import io.github.autochest.task.PlayerTask;
+import io.github.autochest.task.PlayerTaskRegistry;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
@@ -29,7 +30,18 @@ public class DepositService {
         USE_EMPTY
     }
 
+    /** 容器处理结果，用于将提交失败安全传播到预算外层 */
+    private enum ContainerOutcome {
+        /** 当前容器可继续处理 */
+        CONTINUE,
+        /** 当前容器已恢复异常状态，应跳到下一个容器 */
+        SKIP_CONTAINER,
+        /** 事务无法恢复，必须取消整个任务 */
+        ABORT_TASK
+    }
+
     private final ContainerTransaction transaction;
+    private final PlayerTaskRegistry registry;
     private final Plugin plugin;
     private final Logger logger;
 
@@ -37,11 +49,14 @@ public class DepositService {
      * 创建存入服务
      *
      * @param transaction 容器事务执行器
+     * @param registry    玩家任务注册表
      * @param plugin      插件实例（用于调度）
      * @param logger      日志记录器
      */
-    public DepositService(ContainerTransaction transaction, Plugin plugin, Logger logger) {
+    public DepositService(ContainerTransaction transaction, PlayerTaskRegistry registry,
+                          Plugin plugin, Logger logger) {
         this.transaction = transaction;
+        this.registry = registry;
         this.plugin = plugin;
         this.logger = logger;
     }
@@ -72,7 +87,7 @@ public class DepositService {
                           DepositCallback onDone, DepositStats stats) {
         // 验证玩家状态
         Player player = Bukkit.getPlayer(playerTask.getPlayerUuid());
-        if (player == null || !player.isOnline() || player.isDead()
+        if (!registry.isValid(playerTask) || player == null || !player.isOnline() || player.isDead()
                 || !player.getWorld().getUID().equals(playerTask.getWorldUuid())) {
             onDone.onCancelled();
             return;
@@ -101,10 +116,7 @@ public class DepositService {
             return;
         }
 
-        List<ContainerIdentity> identities = new ArrayList<>();
-        for (ContainerDto dto : plan.sortedContainers) {
-            identities.add(dto.identity);
-        }
+        List<ContainerIdentity> identities = new ArrayList<>(plan.sortedContainers);
 
         // 按预算逐容器处理，处理完后若有剩余让出 tick 继续
         processContainersBudgeted(phase, identities, player, world, playerTask, plan, stats, 0,
@@ -160,7 +172,7 @@ public class DepositService {
                 Bukkit.getScheduler().runTask(plugin, () -> {
                     // 重新验证玩家
                     Player freshPlayer = Bukkit.getPlayer(playerTask.getPlayerUuid());
-                    if (freshPlayer == null || !freshPlayer.isOnline() || freshPlayer.isDead()
+                    if (!registry.isValid(playerTask) || freshPlayer == null || !freshPlayer.isOnline() || freshPlayer.isDead()
                             || !freshPlayer.getWorld().getUID().equals(playerTask.getWorldUuid())) {
                         onDone.onCancelled();
                         return;
@@ -172,7 +184,12 @@ public class DepositService {
             }
 
             ContainerIdentity identity = identities.get(i);
-            processOneContainer(phase, identity, player, world, playerTask, plan, stats);
+            ContainerOutcome containerOutcome = processOneContainer(phase, identity, player, world, playerTask, plan, stats);
+            if (containerOutcome == ContainerOutcome.ABORT_TASK) {
+                // 喵~防御：Hook 或库存事务已不可恢复，立即中止整个任务。
+                onDone.onCancelled();
+                return;
+            }
             processed++;
             i++;
         }
@@ -192,41 +209,58 @@ public class DepositService {
      * @param plan       规划结果
      * @param stats      统计数据
      */
-    private void processOneContainer(Phase phase, ContainerIdentity identity, Player player,
-                                      World world, PlayerTask playerTask, PlanResult plan, DepositStats stats) {
-        // 验证玩家和容器
-        ContainerTransaction.ValidationResult vr = transaction.validate(playerTask, identity);
-        if (!vr.isValid()) {
+    /**
+     * 处理单个容器的存入逻辑（不可让出的单次事务）
+     *
+     * @return 当前容器处理结果，用于决定是否继续任务
+     */
+    private ContainerOutcome processOneContainer(Phase phase, ContainerIdentity identity, Player player,
+                                                 World world, PlayerTask playerTask, PlanResult plan, DepositStats stats) {
+        // 验证玩家和容器。
+        ContainerTransaction.ValidationResult validationResult = transaction.validate(playerTask, identity);
+        if (!validationResult.isValid()) {
+            if (validationResult.failureResult == ContainerTransaction.Result.FAILED_HOOK_UNAVAILABLE) {
+                // 喵~防御：Hook 运行期失效，应中止整个任务。
+                return ContainerOutcome.ABORT_TASK;
+            }
             stats.skipped++;
-            return;
+            return ContainerOutcome.CONTINUE;
         }
 
-        Inventory containerInventory = vr.inventory;
-        // 记录本容器操作前的已移动数量，用于判断是否实际参与了本次操作
+        Inventory containerInventory = validationResult.inventory;
         int itemsBeforeThisContainer = stats.itemsMoved;
 
-        // 遍历玩家主背包 9..35 的每个非空槽位
+        // 遍历玩家主背包 9..35 的每个非空槽位。
         for (int playerSlot = 9; playerSlot <= 35; playerSlot++) {
             ItemStack playerItem = ContainerTransaction.cloneOrNull(player.getInventory().getItem(playerSlot));
             if (playerItem == null) {
                 continue;
             }
 
+            String playerItemKey = InventorySnapshotFactory.itemKey(playerItem);
+            // 喵~防御：容器必须在任务快照时已含同类物品，实时新增同类物品不得获得接收资格。
+            if (!plan.isSnapshotCandidate(playerItemKey, identity)) {
+                continue;
+            }
+
+            ContainerOutcome transferOutcome;
             if (phase == Phase.FILL_EXISTING) {
-                // 第一阶段：仅向容器已有非满相似堆叠中填充
-                depositToExistingStacks(player, containerInventory, playerSlot, playerItem, stats);
+                transferOutcome = depositToExistingStacks(player, containerInventory, playerSlot, playerItem, stats);
+            } else if (containerHasSimilar(containerInventory, playerItem)) {
+                transferOutcome = depositToEmptySlots(player, containerInventory, playerSlot, playerItem, stats);
             } else {
-                // 第二阶段：向空槽存入（仅当容器实时仍含同类物品时有资格）
-                if (containerHasSimilar(containerInventory, playerItem)) {
-                    depositToEmptySlots(player, containerInventory, playerSlot, playerItem, stats);
-                }
+                transferOutcome = ContainerOutcome.CONTINUE;
+            }
+
+            if (transferOutcome != ContainerOutcome.CONTINUE) {
+                return transferOutcome;
             }
         }
 
-        // 仅当本容器实际移动了物品时才计为"参与容器"
         if (stats.itemsMoved > itemsBeforeThisContainer) {
             stats.containersUsed++;
         }
+        return ContainerOutcome.CONTINUE;
     }
 
     /**
@@ -237,40 +271,42 @@ public class DepositService {
      * @param playerSlot      玩家槽位
      * @param playerItem      玩家物品快照（仅用于 isSimilar 比较）
      * @param stats           统计数据
+     * @return 当前容器处理结果
      */
-    private void depositToExistingStacks(Player player, Inventory containerInv,
-                                          int playerSlot, ItemStack playerItem, DepositStats stats) {
+    private ContainerOutcome depositToExistingStacks(Player player, Inventory containerInv,
+                                                     int playerSlot, ItemStack playerItem, DepositStats stats) {
         for (int containerSlot = 0; containerSlot < containerInv.getSize(); containerSlot++) {
-            // 检查玩家槽位是否仍有物品（可能在此循环中被耗尽）
             ItemStack current = ContainerTransaction.cloneOrNull(player.getInventory().getItem(playerSlot));
             if (current == null) {
                 break;
             }
 
             ItemStack target = ContainerTransaction.cloneOrNull(containerInv.getItem(containerSlot));
-            // 仅处理：非空、相似、未满的堆叠
-            if (target == null || target.getType().isAir()) {
-                continue;
-            }
-            if (!target.isSimilar(playerItem)) {
-                continue;
-            }
-            if (target.getAmount() >= target.getMaxStackSize()) {
+            if (target == null || !target.isSimilar(playerItem)
+                    || target.getAmount() >= target.getMaxStackSize()) {
                 continue;
             }
 
-            // 计算可移动数量
             int canMove = Math.min(current.getAmount(), target.getMaxStackSize() - target.getAmount());
             if (canMove <= 0) {
                 continue;
             }
 
-            boolean ok = transaction.commitDeposit(player, containerInv, playerSlot, containerSlot, canMove);
-            if (ok) {
-                // 只统计移动数量，容器参与数由 processOneContainer 统一计算
-                stats.itemsMoved += canMove;
+            ContainerTransaction.CommitResult commitResult =
+                    transaction.commitDeposit(player, containerInv, playerSlot, containerSlot, canMove);
+            if (commitResult.status == ContainerTransaction.CommitStatus.SUCCESS) {
+                stats.itemsMoved += commitResult.movedAmount;
+                continue;
+            }
+            if (commitResult.status == ContainerTransaction.CommitStatus.RECOVERED) {
+                stats.skipped++;
+                return ContainerOutcome.SKIP_CONTAINER;
+            }
+            if (commitResult.status == ContainerTransaction.CommitStatus.FAILED_UNRECOVERABLE) {
+                return ContainerOutcome.ABORT_TASK;
             }
         }
+        return ContainerOutcome.CONTINUE;
     }
 
     /**
@@ -281,18 +317,18 @@ public class DepositService {
      * @param playerSlot   玩家槽位
      * @param playerItem   物品快照
      * @param stats        统计数据
+     * @return 当前容器处理结果
      */
-    private void depositToEmptySlots(Player player, Inventory containerInv,
-                                      int playerSlot, ItemStack playerItem, DepositStats stats) {
+    private ContainerOutcome depositToEmptySlots(Player player, Inventory containerInv,
+                                                 int playerSlot, ItemStack playerItem, DepositStats stats) {
         for (int containerSlot = 0; containerSlot < containerInv.getSize(); containerSlot++) {
             ItemStack current = ContainerTransaction.cloneOrNull(player.getInventory().getItem(playerSlot));
             if (current == null) {
                 break;
             }
 
-            ItemStack target = containerInv.getItem(containerSlot);
-            // 只处理真正的空槽
-            if (target != null && !target.getType().isAir()) {
+            ItemStack target = ContainerTransaction.cloneOrNull(containerInv.getItem(containerSlot));
+            if (target != null) {
                 continue;
             }
 
@@ -301,12 +337,21 @@ public class DepositService {
                 continue;
             }
 
-            boolean ok = transaction.commitDeposit(player, containerInv, playerSlot, containerSlot, canMove);
-            if (ok) {
-                // 只统计移动数量，容器参与数由 processOneContainer 统一计算
-                stats.itemsMoved += canMove;
+            ContainerTransaction.CommitResult commitResult =
+                    transaction.commitDeposit(player, containerInv, playerSlot, containerSlot, canMove);
+            if (commitResult.status == ContainerTransaction.CommitStatus.SUCCESS) {
+                stats.itemsMoved += commitResult.movedAmount;
+                continue;
+            }
+            if (commitResult.status == ContainerTransaction.CommitStatus.RECOVERED) {
+                stats.skipped++;
+                return ContainerOutcome.SKIP_CONTAINER;
+            }
+            if (commitResult.status == ContainerTransaction.CommitStatus.FAILED_UNRECOVERABLE) {
+                return ContainerOutcome.ABORT_TASK;
             }
         }
+        return ContainerOutcome.CONTINUE;
     }
 
     /**

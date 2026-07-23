@@ -248,8 +248,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         PlayerTask task = taskOpt.get();
         cooldownService.record(player.getUniqueId(), CooldownService.OperationType.RESTOCK);
 
-        // 开始追踪玩家背包变化，标记失效槽位
-        restockListener.startTracking(player.getUniqueId());
+        // 开始追踪玩家背包变化，并将事件失效写入本次任务的唯一白名单
+        restockListener.startTracking(player.getUniqueId(), whitelist);
 
         messages.sendScanStarted(player);
 
@@ -310,7 +310,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                 plugin,
                 containers -> onRestockScanComplete(task, containers, whitelist),
                 () -> {
-                    restockListener.stopTracking(task.getPlayerUuid());
+                    restockListener.stopTracking(task.getPlayerUuid(), whitelist);
                     onScanCancelled(task);
                 }
         );
@@ -345,23 +345,20 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
             return;
         }
 
-        // 主线程生成库存快照 DTO（Bukkit-free）
-        InventorySnapshotFactory.PlayerInventoryDto playerDto =
-                snapshotFactory.snapshotPlayer(player, 9, 35);
-
+        // 主线程快照容器已有物品，用于限制 deposit 的快照候选资格。
         List<InventorySnapshotFactory.ContainerDto> containerDtos = new ArrayList<>();
         for (ContainerIdentity identity : containers) {
-            org.bukkit.inventory.Inventory inv = getInventorySafely(identity, player.getWorld());
-            if (inv != null) {
-                containerDtos.add(snapshotFactory.snapshotContainer(identity, inv));
+            org.bukkit.inventory.Inventory inventory = getInventorySafely(identity, player.getWorld());
+            if (inventory != null) {
+                containerDtos.add(snapshotFactory.snapshotContainer(identity, inventory));
             }
         }
 
-        // 提交异步规划
+        // 提交异步规划。
         try {
             plugin.getExecutor().submit(() -> {
-                // 在异步线程中仅做排序和候选索引，不访问任何 Bukkit 对象
-                PlanResult plan = planner.plan(playerDto, containerDtos);
+                // 异步线程只建立快照候选索引，不访问 Bukkit 对象。
+                PlanResult plan = planner.plan(containerDtos);
                 // 回到主线程执行存入
                 Bukkit.getScheduler().runTask(plugin, () -> {
                     if (!registry.isValid(task)) {
@@ -415,49 +412,41 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         cancelActiveScanTask(task.getPlayerUuid());
 
         if (!registry.isValid(task)) {
-            restockListener.stopTracking(task.getPlayerUuid());
+            restockListener.stopTracking(task.getPlayerUuid(), whitelist);
             finishTask(task);
             return;
         }
 
         Player player = Bukkit.getPlayer(task.getPlayerUuid());
         if (player == null || !player.isOnline() || player.isDead()) {
-            restockListener.stopTracking(task.getPlayerUuid());
+            restockListener.stopTracking(task.getPlayerUuid(), whitelist);
             finishTask(task);
             return;
         }
 
         if (containers.isEmpty() || whitelist.eligibleSlotsSorted().isEmpty()) {
             plugin.getMessageService().sendNoMatch(player);
-            restockListener.stopTracking(task.getPlayerUuid());
+            restockListener.stopTracking(task.getPlayerUuid(), whitelist);
             finishTask(task);
             return;
         }
 
-        InventorySnapshotFactory.PlayerInventoryDto playerDto =
-                snapshotFactory.snapshotPlayer(player, 0, 35);
-
-        List<InventorySnapshotFactory.ContainerDto> containerDtos = new ArrayList<>();
-        for (ContainerIdentity identity : containers) {
-            org.bukkit.inventory.Inventory inv = getInventorySafely(identity, player.getWorld());
-            if (inv != null) {
-                containerDtos.add(snapshotFactory.snapshotContainer(identity, inv));
-            }
-        }
+        // restock 保持全部距离排序容器候选，确保低序目标槽位优先分配稀缺来源。
+        List<ContainerIdentity> containerIdentities = new ArrayList<>(containers);
 
         try {
             plugin.getExecutor().submit(() -> {
-                PlanResult plan = planner.plan(playerDto, containerDtos);
+                PlanResult plan = planner.planForRestock(containerIdentities);
                 Bukkit.getScheduler().runTask(plugin, () -> {
                     if (!registry.isValid(task)) {
-                        restockListener.stopTracking(task.getPlayerUuid());
+                        restockListener.stopTracking(task.getPlayerUuid(), whitelist);
                         finishTask(task);
                         return;
                     }
                     restockService.execute(plan, task, whitelist, new RestockService.RestockCallback() {
                         @Override
                         public void onComplete(RestockService.RestockStats stats) {
-                            restockListener.stopTracking(task.getPlayerUuid());
+                            restockListener.stopTracking(task.getPlayerUuid(), whitelist);
                             Player p = Bukkit.getPlayer(task.getPlayerUuid());
                             if (p != null && p.isOnline()) {
                                 if (stats.itemsMoved == 0) {
@@ -472,7 +461,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
 
                         @Override
                         public void onCancelled() {
-                            restockListener.stopTracking(task.getPlayerUuid());
+                            restockListener.stopTracking(task.getPlayerUuid(), whitelist);
                             Player p = Bukkit.getPlayer(task.getPlayerUuid());
                             if (p != null && p.isOnline()) {
                                 plugin.getMessageService().sendCancelled(p);
@@ -483,7 +472,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                 });
             });
         } catch (RejectedExecutionException e) {
-            restockListener.stopTracking(task.getPlayerUuid());
+            restockListener.stopTracking(task.getPlayerUuid(), whitelist);
             if (player.isOnline()) {
                 plugin.getMessageService().sendServerBusy(player);
             }

@@ -33,8 +33,8 @@ public class RestockTargetWhitelist {
     private final Map<Integer, SlotEntry> entries;
 
     /**
-     * 已永久失效的槽位集合（用 ConcurrentHashMap.newKeySet 模拟线程安全 Set）
-     * 当主线程检测到槽位物品变化时加入此集合
+     * 已永久失效的槽位集合
+     * 由主线程库存事件和实时提交校验共同写入
      */
     private final Set<Integer> invalidated = Collections.synchronizedSet(new HashSet<>());
 
@@ -97,7 +97,17 @@ public class RestockTargetWhitelist {
      * @param slot 槽位编号
      */
     public void invalidateSlot(int slot) {
-        invalidated.add(slot);
+        if (entries.containsKey(slot)) {
+            invalidated.add(slot);
+        }
+    }
+
+    /**
+     * 使本次任务全部目标槽位永久失效
+     * 用于无法可靠定位所有受影响玩家槽位的库存交互事件
+     */
+    public void invalidateAll() {
+        invalidated.addAll(entries.keySet());
     }
 
     /**

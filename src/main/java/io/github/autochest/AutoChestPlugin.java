@@ -86,7 +86,7 @@ public class AutoChestPlugin extends JavaPlugin {
         accessPolicy = new CompositeAccessPolicy(policies, getLogger());
 
         // 步骤 7：注册事件监听器
-        RestockTargetListener restockListener = new RestockTargetListener(taskRegistry);
+        RestockTargetListener restockListener = new RestockTargetListener();
         getServer().getPluginManager().registerEvents(
                 new PlayerLifecycleListener(taskRegistry), this);
         getServer().getPluginManager().registerEvents(restockListener, this);
@@ -97,9 +97,9 @@ public class AutoChestPlugin extends JavaPlugin {
         ContainerTransaction containerTransaction =
                 new ContainerTransaction(taskRegistry, accessPolicy, getLogger());
         DepositService depositService =
-                new DepositService(containerTransaction, this, getLogger());
+                new DepositService(containerTransaction, taskRegistry, this, getLogger());
         RestockService restockService =
-                new RestockService(containerTransaction, this, getLogger());
+                new RestockService(containerTransaction, taskRegistry, this, getLogger());
 
         // 步骤 9：注册命令
         AutoChestCommand commandHandler = new AutoChestCommand(

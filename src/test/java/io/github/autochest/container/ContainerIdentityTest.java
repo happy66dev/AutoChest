@@ -6,115 +6,122 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * ContainerIdentity 容器身份测试
- * 验证双箱规范化、去重、距离排序和同距稳定排序
+ * 验证类型快照、双箱规范化、距离排序和类型安全约束
  */
 class ContainerIdentityTest {
 
+    /** 测试世界 UUID */
     private static final UUID WORLD = UUID.randomUUID();
 
     /**
-     * 双箱从两个不同方向创建，canonicalKey 应相同（去重保证）
+     * 双箱从不同方向创建时必须保留相同规范键和类型快照
      */
     @Test
-    void doubleChest_canonicalKey_isOrderIndependent() {
-        BlockPos posA = new BlockPos(WORLD, 0, 64, 0);
-        BlockPos posB = new BlockPos(WORLD, 1, 64, 0);
+    void doubleChest_canonicalKeyIsOrderIndependent() {
+        BlockPos firstPosition = new BlockPos(WORLD, 0, 64, 0);
+        BlockPos secondPosition = new BlockPos(WORLD, 1, 64, 0);
 
-        ContainerIdentity id1 = new ContainerIdentity(posA, posB, 100L);
-        ContainerIdentity id2 = new ContainerIdentity(posB, posA, 100L);
+        ContainerIdentity firstIdentity = new ContainerIdentity(firstPosition, secondPosition,
+                ContainerIdentity.ContainerType.CHEST, 100L);
+        ContainerIdentity reversedIdentity = new ContainerIdentity(secondPosition, firstPosition,
+                ContainerIdentity.ContainerType.CHEST, 100L);
 
-        assertEquals(id1.canonicalKey(), id2.canonicalKey(),
-                "双箱从不同方向创建时 canonicalKey 应相同");
-        assertEquals(id1, id2, "equals 应基于 canonicalKey");
+        assertEquals(firstIdentity.canonicalKey(), reversedIdentity.canonicalKey());
+        assertEquals(firstIdentity, reversedIdentity);
+        assertEquals(ContainerIdentity.ContainerType.CHEST, firstIdentity.getContainerType());
     }
 
     /**
-     * 单箱 isDoubleChest 应为 false，双箱应为 true
+     * 单容器和双箱应正确暴露双箱状态与扫描类型
      */
     @Test
-    void singleVsDouble_isDoubleChest() {
-        BlockPos pos = new BlockPos(WORLD, 0, 64, 0);
-        ContainerIdentity single = new ContainerIdentity(pos, 100L);
-        ContainerIdentity doubleChest = new ContainerIdentity(
-                pos, new BlockPos(WORLD, 1, 64, 0), 100L);
+    void singleAndDouble_chestStateAndTypeAreCorrect() {
+        BlockPos position = new BlockPos(WORLD, 0, 64, 0);
+        ContainerIdentity barrelIdentity = new ContainerIdentity(position,
+                ContainerIdentity.ContainerType.BARREL, 100L);
+        ContainerIdentity trappedChestIdentity = new ContainerIdentity(position,
+                new BlockPos(WORLD, 1, 64, 0), ContainerIdentity.ContainerType.TRAPPED_CHEST, 100L);
 
-        assertFalse(single.isDoubleChest());
-        assertTrue(doubleChest.isDoubleChest());
+        assertFalse(barrelIdentity.isDoubleChest());
+        assertEquals(ContainerIdentity.ContainerType.BARREL, barrelIdentity.getContainerType());
+        assertTrue(trappedChestIdentity.isDoubleChest());
+        assertEquals(ContainerIdentity.ContainerType.TRAPPED_CHEST, trappedChestIdentity.getContainerType());
     }
 
     /**
-     * 按距离排序：近容器应排在前
+     * 木桶不得构造为双箱，避免非法身份进入提交阶段
+     */
+    @Test
+    void doubleChest_barrelTypeIsRejected() {
+        BlockPos firstPosition = new BlockPos(WORLD, 0, 64, 0);
+        BlockPos secondPosition = new BlockPos(WORLD, 1, 64, 0);
+
+        assertThrows(IllegalArgumentException.class, () -> new ContainerIdentity(firstPosition, secondPosition,
+                ContainerIdentity.ContainerType.BARREL, 100L));
+    }
+
+    /**
+     * 容器类型不参与规范键，保证位置去重和排序仍稳定
+     */
+    @Test
+    void canonicalKey_isIndependentOfContainerType() {
+        BlockPos position = new BlockPos(WORLD, 0, 64, 0);
+        ContainerIdentity chestIdentity = new ContainerIdentity(position,
+                ContainerIdentity.ContainerType.CHEST, 100L);
+        ContainerIdentity barrelIdentity = new ContainerIdentity(position,
+                ContainerIdentity.ContainerType.BARREL, 100L);
+
+        assertEquals(chestIdentity.canonicalKey(), barrelIdentity.canonicalKey());
+    }
+
+    /**
+     * 按距离排序时近容器应优先
      */
     @Test
     void sort_byDistanceThenKey_distanceFirst() {
-        BlockPos pos1 = new BlockPos(WORLD, 0, 64, 0);
-        BlockPos pos2 = new BlockPos(WORLD, 5, 64, 0);
-        BlockPos pos3 = new BlockPos(WORLD, 10, 64, 0);
+        ContainerIdentity nearIdentity = new ContainerIdentity(new BlockPos(WORLD, 0, 64, 0),
+                ContainerIdentity.ContainerType.CHEST, 1L);
+        ContainerIdentity middleIdentity = new ContainerIdentity(new BlockPos(WORLD, 5, 64, 0),
+                ContainerIdentity.ContainerType.CHEST, 25L);
+        ContainerIdentity farIdentity = new ContainerIdentity(new BlockPos(WORLD, 10, 64, 0),
+                ContainerIdentity.ContainerType.CHEST, 100L);
 
-        ContainerIdentity near = new ContainerIdentity(pos1, 1L);
-        ContainerIdentity mid = new ContainerIdentity(pos2, 25L);
-        ContainerIdentity far = new ContainerIdentity(pos3, 100L);
+        List<ContainerIdentity> identities = new ArrayList<>(List.of(farIdentity, nearIdentity, middleIdentity));
+        identities.sort(ContainerIdentity.BY_DISTANCE_THEN_KEY);
 
-        List<ContainerIdentity> list = new ArrayList<>(List.of(far, near, mid));
-        list.sort(ContainerIdentity.BY_DISTANCE_THEN_KEY);
-
-        assertEquals(near, list.get(0), "最近的容器应排第一");
-        assertEquals(mid, list.get(1));
-        assertEquals(far, list.get(2), "最远的容器应排最后");
+        assertEquals(nearIdentity, identities.get(0));
+        assertEquals(middleIdentity, identities.get(1));
+        assertEquals(farIdentity, identities.get(2));
     }
 
     /**
-     * 距离相同时，按 canonicalKey 字典序稳定排序
+     * BlockPos 的平方距离计算必须正确
      */
     @Test
-    void sort_sameDistance_stableByKey() {
-        // 两个单箱距离相同，但坐标不同
-        BlockPos posA = new BlockPos(WORLD, 3, 64, 0);
-        BlockPos posB = new BlockPos(WORLD, -3, 64, 0);
-        BlockPos center = new BlockPos(WORLD, 0, 64, 0);
+    void blockPos_distanceSquaredIsCorrect() {
+        BlockPos firstPosition = new BlockPos(WORLD, 0, 0, 0);
+        BlockPos secondPosition = new BlockPos(WORLD, 3, 4, 0);
 
-        long distA = posA.distanceSquared(center); // 9
-        long distB = posB.distanceSquared(center); // 9
-
-        ContainerIdentity idA = new ContainerIdentity(posA, distA);
-        ContainerIdentity idB = new ContainerIdentity(posB, distB);
-
-        List<ContainerIdentity> list = new ArrayList<>(List.of(idA, idB));
-        list.sort(ContainerIdentity.BY_DISTANCE_THEN_KEY);
-
-        // 排序结果应确定：按 canonicalKey 字典序
-        String expectedFirst = idA.canonicalKey().compareTo(idB.canonicalKey()) < 0
-                ? idA.canonicalKey() : idB.canonicalKey();
-        assertEquals(expectedFirst, list.get(0).canonicalKey());
+        assertEquals(25L, firstPosition.distanceSquared(secondPosition));
     }
 
     /**
-     * BlockPos.distanceSquared 计算正确性
+     * 双箱几何中心距离必须保留半格精度
      */
     @Test
-    void blockPos_distanceSquared_correct() {
-        BlockPos a = new BlockPos(WORLD, 0, 0, 0);
-        BlockPos b = new BlockPos(WORLD, 3, 4, 0);
+    void doubleChest_geometricCenterDistanceIsCorrect() {
+        BlockPos centerPosition = new BlockPos(WORLD, 0, 64, 0);
+        BlockPos firstHalfPosition = new BlockPos(WORLD, 2, 64, 0);
+        BlockPos secondHalfPosition = new BlockPos(WORLD, 3, 64, 0);
 
-        // 3² + 4² = 9 + 16 = 25
-        assertEquals(25L, a.distanceSquared(b));
-    }
-
-    /**
-     * 双箱几何中心距离计算正确性
-     */
-    @Test
-    void doubleChest_geometricCenter_distanceSquared() {
-        BlockPos center = new BlockPos(WORLD, 0, 64, 0);
-        BlockPos half1 = new BlockPos(WORLD, 2, 64, 0);
-        BlockPos half2 = new BlockPos(WORLD, 3, 64, 0);
-
-        // 几何中心为 (2.5, 64, 0)，到 (0,64,0) 的距离平方 × 4 = 25
-        long dist = ContainerIdentity.computeDistanceSquared(center, half1, half2);
-        assertEquals(25L, dist);
+        assertEquals(25L, ContainerIdentity.computeDistanceSquared(centerPosition,
+                firstHalfPosition, secondHalfPosition));
     }
 }

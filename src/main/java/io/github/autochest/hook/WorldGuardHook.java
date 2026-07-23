@@ -111,9 +111,9 @@ public class WorldGuardHook implements ContainerAccessPolicy {
             adaptWorld = adapterClass.getMethod("adapt", org.bukkit.World.class);
             asBlockVector = adapterClass.getMethod("asBlockVector", Location.class);
 
-            // 缓存 RegionContainer.get(World) 方法
+            // 缓存 WorldGuard 7 RegionContainer.get(WorldEdit World) 方法。
             Class<?> containerClass = Class.forName("com.sk89q.worldguard.protection.managers.RegionContainer");
-            Class<?> worldClass = Class.forName("com.sk89q.worldguard.LocalWorld");
+            Class<?> worldClass = Class.forName("com.sk89q.worldedit.world.World");
             getRegionManager = containerClass.getMethod("get", worldClass);
 
             // 缓存 RegionManager.getApplicableRegions 方法

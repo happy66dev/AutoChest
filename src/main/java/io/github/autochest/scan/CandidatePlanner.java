@@ -2,86 +2,89 @@ package io.github.autochest.scan;
 
 import io.github.autochest.container.ContainerIdentity;
 import io.github.autochest.scan.InventorySnapshotFactory.ContainerDto;
-import io.github.autochest.scan.InventorySnapshotFactory.PlayerInventoryDto;
-import io.github.autochest.scan.InventorySnapshotFactory.SlotDto;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * 异步候选规划器，在插件私有线程池中运行
  * 只处理 Bukkit-free DTO，不访问任何实时 Bukkit 对象
- * 输出候选索引供主线程逐容器实时重算使用，不作为最终移动量依据
+ * 输出快照物品身份到候选容器身份的映射，供 deposit 提交阶段强制验证资格
  */
 public class CandidatePlanner {
 
     /**
-     * 规划结果，包含按距离排序的容器列表和物品候选索引
-     * 所有字段均为 Bukkit-free，可安全在任意线程传递
+     * 规划结果，包含稳定容器顺序与快照物品候选资格
      */
     public static final class PlanResult {
-        /** 按距离和坐标键稳定排序的容器列表 */
-        public final List<ContainerDto> sortedContainers;
-        /** 物品键（字节数组） 到 候选容器列表 的映射，用于快速定位可能的目标容器 */
-        public final Map<String, List<ContainerDto>> itemKeyToCandidates;
+        /** 按距离和坐标键稳定排序的容器身份 */
+        public final List<ContainerIdentity> sortedContainers;
+        /** 物品身份键到快照时含有该物品的容器规范键集合 */
+        public final Map<String, Set<String>> itemKeyToCandidateKeys;
 
-        PlanResult(List<ContainerDto> sortedContainers, Map<String, List<ContainerDto>> itemKeyToCandidates) {
+        PlanResult(List<ContainerIdentity> sortedContainers,
+                   Map<String, Set<String>> itemKeyToCandidateKeys) {
             this.sortedContainers = Collections.unmodifiableList(sortedContainers);
-            this.itemKeyToCandidates = Collections.unmodifiableMap(itemKeyToCandidates);
+            this.itemKeyToCandidateKeys = Collections.unmodifiableMap(itemKeyToCandidateKeys);
+        }
+
+        /**
+         * 判断容器是否在任务快照时拥有该完整物品身份
+         *
+         * @param itemKey 物品身份键
+         * @param identity 容器身份
+         * @return true 表示可继续执行实时库存复验
+         */
+        public boolean isSnapshotCandidate(String itemKey, ContainerIdentity identity) {
+            if (itemKey == null || identity == null) {
+                return false;
+            }
+            Set<String> candidateKeys = itemKeyToCandidateKeys.get(itemKey);
+            return candidateKeys != null && candidateKeys.contains(identity.canonicalKey());
         }
     }
 
     /**
-     * 在异步线程中执行规划
-     * 完成排序并建立物品候选索引
+     * 为 restock 创建不受快照物品资格限制的稳定容器计划
      *
-     * @param playerDto  玩家库存快照（Bukkit-free）
-     * @param containers 扫描到的容器快照列表（已由扫描阶段按距离排序）
-     * @return 规划结果
+     * @param identities 扫描到的距离排序容器身份
+     * @return restock 规划结果
      */
-    public PlanResult plan(PlayerInventoryDto playerDto, List<ContainerDto> containers) {
-        // 容器列表已由 ScanTask 按距离排序，此处直接复制保持顺序
-        List<ContainerDto> sorted = new ArrayList<>(containers);
-
-        // 建立物品键 → 候选容器映射
-        // 对每个容器的每个非空槽位，将物品键归入对应候选列表
-        Map<String, List<ContainerDto>> index = new LinkedHashMap<>();
-
-        for (ContainerDto container : sorted) {
-            for (SlotDto slot : container.slots) {
-                if (!slot.isEmpty && slot.itemKey.length > 0) {
-                    // 使用字节数组转 Base64 或哈希作为 Map 键
-                    // 主线程最终仍用 isSimilar() 重验，此处只需粗粒度索引
-                    String key = toIndexKey(slot.itemKey);
-                    index.computeIfAbsent(key, k -> new ArrayList<>()).add(container);
-                }
-            }
+    public PlanResult planForRestock(List<ContainerIdentity> identities) {
+        if (identities == null || identities.isEmpty()) {
+            return new PlanResult(List.of(), Map.of());
         }
-
-        // 去重：同一容器可能因多个槽位相同物品而被重复添加，保留首次出现
-        for (Map.Entry<String, List<ContainerDto>> entry : index.entrySet()) {
-            List<ContainerDto> deduped = new ArrayList<>();
-            Set<String> seen = new HashSet<>();
-            for (ContainerDto container : entry.getValue()) {
-                String id = container.identity.canonicalKey();
-                if (seen.add(id)) {
-                    deduped.add(container);
-                }
-            }
-            entry.setValue(deduped);
-        }
-
-        return new PlanResult(sorted, index);
+        return new PlanResult(new ArrayList<>(identities), Map.of());
     }
 
-    /**
-     * 将物品序列化字节转为索引键字符串
-     * 仅用于异步候选索引，不用于最终物品匹配
-     *
-     * @param bytes 物品序列化字节
-     * @return 索引键字符串
-     */
-    private static String toIndexKey(byte[] bytes) {
-        // 使用简单哈希作为索引键，碰撞时主线程 isSimilar() 会过滤
-        return Integer.toHexString(Arrays.hashCode(bytes));
+
+    public PlanResult plan(List<ContainerDto> containers) {
+        if (containers == null || containers.isEmpty()) {
+            return new PlanResult(List.of(), Map.of());
+        }
+
+        List<ContainerIdentity> sortedContainers = new ArrayList<>();
+        Map<String, Set<String>> mutableCandidateKeys = new LinkedHashMap<>();
+        for (ContainerDto container : containers) {
+            if (container == null || container.identity == null) {
+                continue;
+            }
+            sortedContainers.add(container.identity);
+            for (String itemKey : container.itemKeys) {
+                mutableCandidateKeys.computeIfAbsent(itemKey, ignored -> new LinkedHashSet<>())
+                        .add(container.identity.canonicalKey());
+            }
+        }
+
+        Map<String, Set<String>> immutableCandidateKeys = new LinkedHashMap<>();
+        for (Map.Entry<String, Set<String>> entry : mutableCandidateKeys.entrySet()) {
+            immutableCandidateKeys.put(entry.getKey(), Collections.unmodifiableSet(new LinkedHashSet<>(entry.getValue())));
+        }
+        return new PlanResult(sortedContainers, immutableCandidateKeys);
     }
 }

@@ -8,6 +8,7 @@ import io.github.autochest.task.PlayerTask;
 import io.github.autochest.task.PlayerTaskRegistry;
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
+import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
@@ -225,21 +226,30 @@ public class ScanTask implements Runnable {
 
                 BlockPos posA = new BlockPos(world.getUID(), leftBlock.getX(), leftBlock.getY(), leftBlock.getZ());
                 BlockPos posB = new BlockPos(world.getUID(), rightBlock.getX(), rightBlock.getY(), rightBlock.getZ());
+                ContainerIdentity.ContainerType containerType = toContainerType(leftBlock.getType());
+                if (containerType == null || leftBlock.getType() != rightBlock.getType()) {
+                    return;
+                }
                 BlockPos center = new BlockPos(world.getUID(), cx, cy, cz);
 
                 long distSq = ContainerIdentity.computeDistanceSquared(center, posA, posB);
-                identity = new ContainerIdentity(posA, posB, distSq);
+                identity = new ContainerIdentity(posA, posB, containerType, distSq);
             } else {
                 // 单箱
                 BlockPos pos = new BlockPos(world.getUID(), block.getX(), block.getY(), block.getZ());
+                ContainerIdentity.ContainerType containerType = toContainerType(block.getType());
+                if (containerType == null) {
+                    return;
+                }
                 BlockPos center = new BlockPos(world.getUID(), cx, cy, cz);
-                identity = new ContainerIdentity(pos, pos.distanceSquared(center));
+                identity = new ContainerIdentity(pos, containerType, pos.distanceSquared(center));
             }
         } else {
             // 木桶（Barrel）
             BlockPos pos = new BlockPos(world.getUID(), block.getX(), block.getY(), block.getZ());
             BlockPos center = new BlockPos(world.getUID(), cx, cy, cz);
-            identity = new ContainerIdentity(pos, pos.distanceSquared(center));
+            identity = new ContainerIdentity(pos, ContainerIdentity.ContainerType.BARREL,
+                    pos.distanceSquared(center));
         }
 
         // 去重：已发现过的容器直接跳过
@@ -266,6 +276,24 @@ public class ScanTask implements Runnable {
         }
     }
 
+    /**
+     * 将允许扫描的 Bukkit 材料转换为容器类型快照
+     *
+     * @param material 扫描时方块材料
+     * @return 对应容器类型，不支持时返回 null
+     */
+    private ContainerIdentity.ContainerType toContainerType(Material material) {
+        if (material == Material.CHEST) {
+            return ContainerIdentity.ContainerType.CHEST;
+        }
+        if (material == Material.TRAPPED_CHEST) {
+            return ContainerIdentity.ContainerType.TRAPPED_CHEST;
+        }
+        if (material == Material.BARREL) {
+            return ContainerIdentity.ContainerType.BARREL;
+        }
+        return null;
+    }
     /**
      * 根据容器身份构建对应的 Bukkit Block 数组
      * 双箱两半区块若有任一未加载则返回 null

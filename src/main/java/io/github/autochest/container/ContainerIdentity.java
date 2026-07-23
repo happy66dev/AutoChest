@@ -4,78 +4,105 @@ import java.util.Comparator;
 
 /**
  * 不可变的容器身份，规范化单箱、双箱和木桶
- * 双箱保存两半坐标，用于跨区块加载检查和去重
+ * 保存扫描时的容器类型，用于提交前拒绝方块被替换后的其他库存
  * 不持有 Bukkit Block、Inventory 或 World 引用
  */
 public final class ContainerIdentity {
 
-    /** 容器规范化主坐标（双箱取两半中字典序较小者） */
+    /** 扫描时允许参与任务的容器类型 */
+    public enum ContainerType {
+        /** 普通箱子 */
+        CHEST,
+        /** 陷阱箱 */
+        TRAPPED_CHEST,
+        /** 木桶 */
+        BARREL;
+
+        /**
+         * 判断该类型能否组成双箱
+         *
+         * @return true 表示普通箱或陷阱箱可组成双箱
+         */
+        public boolean supportsDoubleChest() {
+            return this == CHEST || this == TRAPPED_CHEST;
+        }
+    }
+
+    /** 容器规范化主坐标，双箱取两半中字典序较小者 */
     private final BlockPos primaryPos;
 
-    /**
-     * 双箱另一半坐标；单箱或木桶为 null
-     * 注意：读取双箱任何一半的方块状态前，必须先确认两半区块均已加载
-     */
+    /** 双箱另一半坐标；单容器为 null */
     private final BlockPos secondaryPos;
+
+    /** 扫描时记录的精确容器类型 */
+    private final ContainerType containerType;
 
     /** 从扫描中心到本容器几何中心的平方欧氏距离，用于排序 */
     private final long distanceSquared;
 
-    /**
-     * 按距离升序，距离相同按 canonicalKey 字典序升序排列的比较器
-     * 保证多容器处理顺序确定且可重复
-     */
+    /** 按距离和规范坐标键确定排序，保证容器处理顺序稳定 */
     public static final Comparator<ContainerIdentity> BY_DISTANCE_THEN_KEY =
             Comparator.comparingLong(ContainerIdentity::getDistanceSquared)
                     .thenComparing(ContainerIdentity::canonicalKey);
 
     /**
-     * 创建容器身份（单箱或木桶）
+     * 创建单容器身份
      *
-     * @param pos              容器坐标
-     * @param distanceSquared  到扫描中心的平方距离
+     * @param position        容器坐标
+     * @param containerType   扫描时容器类型
+     * @param distanceSquared 到扫描中心的平方距离
      */
-    public ContainerIdentity(BlockPos pos, long distanceSquared) {
-        this.primaryPos = pos;
+    public ContainerIdentity(BlockPos position, ContainerType containerType, long distanceSquared) {
+        // 喵~防御：单容器身份不能缺少坐标或类型快照。
+        if (position == null || containerType == null) {
+            throw new IllegalArgumentException("容器坐标和类型不能为空");
+        }
+        this.primaryPos = position;
         this.secondaryPos = null;
+        this.containerType = containerType;
         this.distanceSquared = distanceSquared;
     }
 
     /**
      * 创建双箱容器身份
-     * 内部按 key 字典序自动规范化，保证同一双箱无论从哪一半发现都生成相同 canonicalKey
+     * 内部按 key 字典序规范化两半位置，保证从任意一半发现时键相同
      *
-     * @param posA            双箱一半坐标
-     * @param posB            双箱另一半坐标
-     * @param distanceSquared 到扫描中心的平方距离（以几何中心计算）
+     * @param positionA       双箱一半坐标
+     * @param positionB       双箱另一半坐标
+     * @param containerType   扫描时两半共同的箱子类型
+     * @param distanceSquared 到扫描中心的平方距离
      */
-    public ContainerIdentity(BlockPos posA, BlockPos posB, long distanceSquared) {
-        // 按字典序决定主副，保证去重时两半顺序一致
-        if (posA.toKey().compareTo(posB.toKey()) <= 0) {
-            this.primaryPos = posA;
-            this.secondaryPos = posB;
-        } else {
-            this.primaryPos = posB;
-            this.secondaryPos = posA;
+    public ContainerIdentity(BlockPos positionA, BlockPos positionB,
+                             ContainerType containerType, long distanceSquared) {
+        // 喵~防御：双箱必须包含两半坐标且只能由箱子类型组成。
+        if (positionA == null || positionB == null || containerType == null
+                || !containerType.supportsDoubleChest()) {
+            throw new IllegalArgumentException("双箱坐标无效或容器类型不支持双箱");
         }
+        if (positionA.toKey().compareTo(positionB.toKey()) <= 0) {
+            this.primaryPos = positionA;
+            this.secondaryPos = positionB;
+        } else {
+            this.primaryPos = positionB;
+            this.secondaryPos = positionA;
+        }
+        this.containerType = containerType;
         this.distanceSquared = distanceSquared;
     }
 
     /**
      * 判断是否为双箱
      *
-     * @return true 表示双箱
+     * @return true 表示身份包含双箱另一半坐标
      */
     public boolean isDoubleChest() {
         return secondaryPos != null;
     }
 
     /**
-     * 生成规范化的唯一键，用于去重和排序
-     * 双箱：primaryKey + "|" + secondaryKey
-     * 单箱/木桶：primaryKey
+     * 生成规范化唯一键，仅由坐标组成以保持去重和排序稳定
      *
-     * @return 规范化唯一键字符串
+     * @return 单容器坐标键或双箱坐标对键
      */
     public String canonicalKey() {
         if (secondaryPos != null) {
@@ -85,33 +112,33 @@ public final class ContainerIdentity {
     }
 
     /**
-     * 计算容器几何中心到另一坐标的平方距离
-     * 供外部扫描时计算距离（内部已缓存结果）
+     * 计算双箱几何中心到扫描中心的平方距离
      *
      * @param center 扫描中心坐标
-     * @return 平方距离
+     * @param positionA 双箱一半坐标
+     * @param positionB 双箱另一半坐标
+     * @return 放大四倍以保留半格精度的平方距离
      */
-    public static long computeDistanceSquared(BlockPos center, BlockPos posA, BlockPos posB) {
-        // 双箱几何中心：两半坐标各轴取平均，使用 0.5 精度
-        double cx = (posA.getX() + posB.getX()) / 2.0;
-        double cy = (posA.getY() + posB.getY()) / 2.0;
-        double cz = (posA.getZ() + posB.getZ()) / 2.0;
-        double dx = center.getX() - cx;
-        double dy = center.getY() - cy;
-        double dz = center.getZ() - cz;
-        // 返回放大 4 倍的整数值，保留精度又避免浮点排序不一致
-        return (long) (dx * dx * 4 + dy * dy * 4 + dz * dz * 4);
+    public static long computeDistanceSquared(BlockPos center, BlockPos positionA, BlockPos positionB) {
+        double centerX = (positionA.getX() + positionB.getX()) / 2.0;
+        double centerY = (positionA.getY() + positionB.getY()) / 2.0;
+        double centerZ = (positionA.getZ() + positionB.getZ()) / 2.0;
+        double deltaX = center.getX() - centerX;
+        double deltaY = center.getY() - centerY;
+        double deltaZ = center.getZ() - centerZ;
+        return (long) (deltaX * deltaX * 4 + deltaY * deltaY * 4 + deltaZ * deltaZ * 4);
     }
 
     public BlockPos getPrimaryPos() { return primaryPos; }
     public BlockPos getSecondaryPos() { return secondaryPos; }
+    public ContainerType getContainerType() { return containerType; }
     public long getDistanceSquared() { return distanceSquared; }
 
     @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (!(o instanceof ContainerIdentity other)) return false;
-        return canonicalKey().equals(other.canonicalKey());
+    public boolean equals(Object other) {
+        if (this == other) return true;
+        if (!(other instanceof ContainerIdentity identity)) return false;
+        return canonicalKey().equals(identity.canonicalKey());
     }
 
     @Override
@@ -121,6 +148,7 @@ public final class ContainerIdentity {
 
     @Override
     public String toString() {
-        return "ContainerIdentity{" + canonicalKey() + ", dist²=" + distanceSquared + "}";
+        return "ContainerIdentity{" + canonicalKey() + ", type=" + containerType
+                + ", dist²=" + distanceSquared + "}";
     }
 }
