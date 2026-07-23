@@ -100,11 +100,11 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- MockBukkit 用于测试 Paper 插件逻辑 -->
+        <!-- MockBukkit 用于测试 Paper 插件逻辑（新坐标，支持 Paper 1.21.x） -->
         <dependency>
-            <groupId>com.github.seeseemelk</groupId>
-            <artifactId>MockBukkit-v1.21</artifactId>
-            <version>3.133.0</version>
+            <groupId>org.mockbukkit.mockbukkit</groupId>
+            <artifactId>mockbukkit-v1.21</artifactId>
+            <version>4.26.0</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

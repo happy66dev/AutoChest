@@ -1,0 +1,142 @@
+package io.github.autochest.service;
+
+import org.bukkit.inventory.ItemStack;
+
+import java.util.*;
+
+/**
+ * Restock 目标槽位不可变白名单
+ * 在命令接受时生成，记录各槽位的初始物品身份和最大堆叠数
+ * 槽位一旦变化（物品变更或置空）即永久失去本次任务的补货资格
+ */
+public class RestockTargetWhitelist {
+
+    /**
+     * 目标槽位信息，不可变
+     */
+    private static final class SlotEntry {
+        /** 初始物品深拷贝，用于 isSimilar 比较 */
+        final ItemStack expectedItem;
+        /** 该物品的最大堆叠数 */
+        final int maxStackSize;
+
+        SlotEntry(ItemStack expectedItem, int maxStackSize) {
+            this.expectedItem = expectedItem;
+            this.maxStackSize = maxStackSize;
+        }
+    }
+
+    /**
+     * 合格槽位初始快照，槽位编号 → 槽位信息
+     * 只包含任务开始时非满的非空槽位（0..35）
+     */
+    private final Map<Integer, SlotEntry> entries;
+
+    /**
+     * 已永久失效的槽位集合（用 ConcurrentHashMap.newKeySet 模拟线程安全 Set）
+     * 当主线程检测到槽位物品变化时加入此集合
+     */
+    private final Set<Integer> invalidated = Collections.synchronizedSet(new HashSet<>());
+
+    /**
+     * 在命令接受时创建白名单快照
+     * 必须在主线程调用
+     *
+     * @param player 执行 restock 的玩家
+     */
+    public RestockTargetWhitelist(org.bukkit.entity.Player player) {
+        Map<Integer, SlotEntry> map = new LinkedHashMap<>();
+        // 遍历主背包+快捷栏 0..35，记录初始状态
+        for (int slot = 0; slot <= 35; slot++) {
+            ItemStack item = player.getInventory().getItem(slot);
+            if (item == null || item.getType().isAir()) {
+                // 空槽不纳入目标
+                continue;
+            }
+            if (item.getAmount() >= item.getMaxStackSize()) {
+                // 已满堆叠不需要补货
+                continue;
+            }
+            // 深拷贝，不保留原始引用
+            map.put(slot, new SlotEntry(item.clone(), item.getMaxStackSize()));
+        }
+        this.entries = Collections.unmodifiableMap(map);
+    }
+
+    /**
+     * 检查指定槽位是否仍具有本次补货资格
+     * 若当前物品与快照不相似，则永久标记失效
+     *
+     * @param slot        槽位编号
+     * @param currentItem 当前实时物品（可为 null，表示空槽）
+     * @return true 表示仍有资格
+     */
+    public boolean isEligible(int slot, ItemStack currentItem) {
+        // 不在白名单中的槽位直接不合格
+        SlotEntry entry = entries.get(slot);
+        if (entry == null) {
+            return false;
+        }
+        // 已被标记失效
+        if (invalidated.contains(slot)) {
+            return false;
+        }
+        // 当前为空或不相似，永久标记失效
+        if (currentItem == null || currentItem.getType().isAir()
+                || !currentItem.isSimilar(entry.expectedItem)) {
+            invalidated.add(slot);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 手动标记槽位永久失效（由 RestockTargetListener 提示调用）
+     * 提交时 isEligible 仍会做最终实时判断
+     *
+     * @param slot 槽位编号
+     */
+    public void invalidateSlot(int slot) {
+        invalidated.add(slot);
+    }
+
+    /**
+     * 获取按槽位升序排列的合格槽位列表
+     * 只返回当前尚未失效的槽位
+     *
+     * @return 合格槽位编号列表（按升序）
+     */
+    public List<Integer> eligibleSlotsSorted() {
+        List<Integer> result = new ArrayList<>();
+        for (int slot : entries.keySet()) {
+            // 跳过已明确失效的槽位
+            if (!invalidated.contains(slot)) {
+                result.add(slot);
+            }
+        }
+        // entries 是 LinkedHashMap 按插入顺序（槽位升序）维护，无需额外排序
+        return result;
+    }
+
+    /**
+     * 获取指定槽位的初始期望物品（用于补货量计算）
+     *
+     * @param slot 槽位编号
+     * @return 期望物品的 clone，若不存在则返回 null
+     */
+    public ItemStack getExpectedItem(int slot) {
+        SlotEntry entry = entries.get(slot);
+        return entry != null ? entry.expectedItem.clone() : null;
+    }
+
+    /**
+     * 获取指定槽位的最大堆叠数
+     *
+     * @param slot 槽位编号
+     * @return 最大堆叠数，若不存在则返回 64
+     */
+    public int getMaxStackSize(int slot) {
+        SlotEntry entry = entries.get(slot);
+        return entry != null ? entry.maxStackSize : 64;
+    }
+}

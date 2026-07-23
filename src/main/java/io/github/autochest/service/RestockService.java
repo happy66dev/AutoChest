@@ -1,0 +1,228 @@
+package io.github.autochest.service;
+
+import io.github.autochest.container.ContainerIdentity;
+import io.github.autochest.scan.CandidatePlanner.PlanResult;
+import io.github.autochest.scan.InventorySnapshotFactory.ContainerDto;
+import io.github.autochest.task.PlayerTask;
+import org.bukkit.Bukkit;
+import org.bukkit.World;
+import org.bukkit.entity.Player;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.plugin.Plugin;
+
+import java.util.*;
+import java.util.logging.Logger;
+
+/**
+ * 补货服务（Restock）
+ * 以玩家槽位为外层优先级，从附近容器取物品补满已有非满堆叠
+ * 目标槽位白名单在命令接受时生成，变化即永久失效
+ */
+public class RestockService {
+
+    private final ContainerTransaction transaction;
+    private final Plugin plugin;
+    private final Logger logger;
+
+    /**
+     * 创建补货服务
+     *
+     * @param transaction 容器事务执行器
+     * @param plugin      插件实例（用于调度）
+     * @param logger      日志记录器
+     */
+    public RestockService(ContainerTransaction transaction, Plugin plugin, Logger logger) {
+        this.transaction = transaction;
+        this.plugin = plugin;
+        this.logger = logger;
+    }
+
+    /**
+     * 执行补货操作
+     * 按玩家槽位升序（外层）× 容器距离升序（内层）分配来源物品
+     *
+     * @param plan       异步规划结果
+     * @param playerTask 玩家任务
+     * @param whitelist  命令接受时生成的不可变目标槽位白名单
+     * @param onDone     完成后的回调
+     */
+    public void execute(PlanResult plan, PlayerTask playerTask,
+                         RestockTargetWhitelist whitelist, RestockCallback onDone) {
+        // 获取按槽位升序排列的合格目标槽位
+        List<Integer> eligibleSlots = whitelist.eligibleSlotsSorted();
+        if (eligibleSlots.isEmpty()) {
+            onDone.onComplete(new RestockStats());
+            return;
+        }
+
+        List<ContainerIdentity> identities = new ArrayList<>();
+        for (ContainerDto dto : plan.sortedContainers) {
+            identities.add(dto.identity);
+        }
+
+        processSlotsBudgeted(eligibleSlots, 0, identities, playerTask, whitelist,
+                new RestockStats(), onDone);
+    }
+
+    /**
+     * 按预算逐槽位处理，超出预算则让出 tick 后继续
+     *
+     * @param eligibleSlots 合格目标槽位列表
+     * @param slotIndex     当前处理到第几个槽位
+     * @param identities    容器列表
+     * @param playerTask    玩家任务
+     * @param whitelist     目标槽位白名单
+     * @param stats         统计数据
+     * @param onDone        完成回调
+     */
+    private void processSlotsBudgeted(
+            List<Integer> eligibleSlots,
+            int slotIndex,
+            List<ContainerIdentity> identities,
+            PlayerTask playerTask,
+            RestockTargetWhitelist whitelist,
+            RestockStats stats,
+            RestockCallback onDone
+    ) {
+        Player player = Bukkit.getPlayer(playerTask.getPlayerUuid());
+        if (player == null || !player.isOnline() || player.isDead()
+                || !player.getWorld().getUID().equals(playerTask.getWorldUuid())) {
+            onDone.onCancelled();
+            return;
+        }
+
+        World world = player.getWorld();
+        int containersPerTick = playerTask.getConfigSnapshot().getSubmitContainersPerTick();
+        long nanosPerTick = playerTask.getConfigSnapshot().getSubmitNanosPerTick();
+        long tickStart = System.nanoTime();
+        int processed = 0;
+
+        int i = slotIndex;
+        while (i < eligibleSlots.size()) {
+            // 每处理 containersPerTick 个槽位或超时则让出 tick
+            if (processed >= containersPerTick || System.nanoTime() - tickStart >= nanosPerTick) {
+                final int nextSlotIndex = i;
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    Player fp = Bukkit.getPlayer(playerTask.getPlayerUuid());
+                    if (fp == null || !fp.isOnline() || fp.isDead()
+                            || !fp.getWorld().getUID().equals(playerTask.getWorldUuid())) {
+                        onDone.onCancelled();
+                        return;
+                    }
+                    processSlotsBudgeted(eligibleSlots, nextSlotIndex, identities,
+                            playerTask, whitelist, stats, onDone);
+                });
+                return;
+            }
+
+            int playerSlot = eligibleSlots.get(i);
+
+            // 实时检查槽位资格（仍需与白名单快照 isSimilar）
+            ItemStack currentItem = ContainerTransaction.cloneOrNull(player.getInventory().getItem(playerSlot));
+            if (!whitelist.isEligible(playerSlot, currentItem)) {
+                // 槽位已失效，跳过
+                i++;
+                processed++;
+                continue;
+            }
+
+            int needed = currentItem.getMaxStackSize() - currentItem.getAmount();
+            if (needed <= 0) {
+                // 已满，跳过
+                i++;
+                processed++;
+                continue;
+            }
+
+            // 从容器列表取物品补充到该槽位
+            needed = restockFromContainers(player, world, playerSlot, currentItem, needed,
+                    identities, playerTask, stats);
+
+            i++;
+            processed++;
+        }
+
+        // 所有槽位处理完毕
+        onDone.onComplete(stats);
+    }
+
+    /**
+     * 从候选容器中取物品补充到玩家指定槽位
+     *
+     * @param player     玩家
+     * @param world      世界
+     * @param playerSlot 玩家目标槽位
+     * @param playerItem 玩家物品快照
+     * @param needed     还需补充的数量
+     * @param identities 容器列表（按距离排序）
+     * @param playerTask 玩家任务
+     * @param stats      统计数据
+     * @return 剩余未满数量（0 表示已补满）
+     */
+    private int restockFromContainers(Player player, World world, int playerSlot,
+                                       ItemStack playerItem, int needed,
+                                       List<ContainerIdentity> identities,
+                                       PlayerTask playerTask, RestockStats stats) {
+        for (ContainerIdentity identity : identities) {
+            if (needed <= 0) {
+                break;
+            }
+
+            // 验证容器
+            ContainerTransaction.ValidationResult vr = transaction.validate(playerTask, identity);
+            if (!vr.isValid()) {
+                stats.skipped++;
+                continue;
+            }
+
+            Inventory containerInv = vr.inventory;
+
+            // 从容器中寻找相似物品槽位
+            for (int containerSlot = 0; containerSlot < containerInv.getSize(); containerSlot++) {
+                if (needed <= 0) {
+                    break;
+                }
+                ItemStack containerItem = ContainerTransaction.cloneOrNull(containerInv.getItem(containerSlot));
+                if (containerItem == null) {
+                    continue;
+                }
+                // 使用实时 isSimilar 验证
+                if (!containerItem.isSimilar(playerItem)) {
+                    continue;
+                }
+
+                int canMove = Math.min(needed, containerItem.getAmount());
+                if (canMove <= 0) {
+                    continue;
+                }
+
+                boolean ok = transaction.commitRestock(player, containerInv, playerSlot, containerSlot, canMove);
+                if (ok) {
+                    needed -= canMove;
+                    stats.itemsMoved += canMove;
+                    stats.containersUsed++;
+                }
+            }
+        }
+        return needed;
+    }
+
+    /** 补货统计数据 */
+    public static class RestockStats {
+        /** 成功补充的物品总数 */
+        public int itemsMoved;
+        /** 实际参与的容器数 */
+        public int containersUsed;
+        /** 跳过的容器数 */
+        public int skipped;
+    }
+
+    /** 补货操作完成回调接口 */
+    public interface RestockCallback {
+        /** 完成时调用 */
+        void onComplete(RestockStats stats);
+        /** 任务被取消时调用 */
+        void onCancelled();
+    }
+}

@@ -1,0 +1,305 @@
+package io.github.autochest.scan;
+
+import io.github.autochest.container.BlockPos;
+import io.github.autochest.container.ContainerIdentity;
+import io.github.autochest.hook.CompositeAccessPolicy;
+import io.github.autochest.hook.HookUnavailableException;
+import io.github.autochest.task.PlayerTask;
+import io.github.autochest.task.PlayerTaskRegistry;
+import org.bukkit.Bukkit;
+import org.bukkit.Chunk;
+import org.bukkit.World;
+import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
+import org.bukkit.block.Chest;
+import org.bukkit.block.DoubleChest;
+import org.bukkit.entity.Player;
+import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.plugin.Plugin;
+
+import java.util.*;
+import java.util.function.Consumer;
+
+/**
+ * 分 tick 容器扫描器
+ * 按双预算（方块数 + 纳秒数）在每个 tick 推进坐标枚举
+ * 只读取已加载区块，不加载新区块，不持有 Player 引用超过 tick 执行范围
+ */
+public class ScanTask implements Runnable {
+
+    /** 执行扫描的玩家任务 */
+    private final PlayerTask playerTask;
+
+    /** 任务注册表，用于 isValid 检查 */
+    private final PlayerTaskRegistry registry;
+
+    /** 复合访问策略，扫描时过滤受保护容器 */
+    private final CompositeAccessPolicy accessPolicy;
+
+    /** 插件实例，用于调度和日志 */
+    private final Plugin plugin;
+
+    /** 扫描完成时的回调，在主线程调用 */
+    private final Consumer<List<ContainerIdentity>> onComplete;
+
+    /** 扫描被取消时的回调，在主线程调用 */
+    private final Runnable onCancelled;
+
+    // ===== 扫描状态 =====
+
+    /** 当前扫描的坐标偏移 X（相对中心） */
+    private int offsetX;
+
+    /** 当前扫描的坐标偏移 Y */
+    private int offsetY;
+
+    /** 当前扫描的坐标偏移 Z */
+    private int offsetZ;
+
+    /** 扫描范围 X 半径 */
+    private final int radiusX;
+
+    /** 扫描范围 Y 半径 */
+    private final int radiusY;
+
+    /** 扫描范围 Z 半径 */
+    private final int radiusZ;
+
+    /** 已发现的容器，使用 canonicalKey 去重 */
+    private final LinkedHashMap<String, ContainerIdentity> found = new LinkedHashMap<>();
+
+    /** 是否已完成扫描 */
+    private boolean finished = false;
+
+    /**
+     * 创建扫描任务
+     *
+     * @param playerTask   玩家任务
+     * @param registry     任务注册表
+     * @param accessPolicy 容器访问策略
+     * @param plugin       插件实例
+     * @param onComplete   扫描完成回调（传入排序后的容器列表）
+     * @param onCancelled  扫描取消回调
+     */
+    public ScanTask(
+            PlayerTask playerTask,
+            PlayerTaskRegistry registry,
+            CompositeAccessPolicy accessPolicy,
+            Plugin plugin,
+            Consumer<List<ContainerIdentity>> onComplete,
+            Runnable onCancelled
+    ) {
+        this.playerTask = playerTask;
+        this.registry = registry;
+        this.accessPolicy = accessPolicy;
+        this.plugin = plugin;
+        this.onComplete = onComplete;
+        this.onCancelled = onCancelled;
+
+        this.radiusX = playerTask.getConfigSnapshot().getScanRadiusX();
+        this.radiusY = playerTask.getConfigSnapshot().getScanRadiusY();
+        this.radiusZ = playerTask.getConfigSnapshot().getScanRadiusZ();
+
+        // 从偏移量 (-radiusX, -radiusY, -radiusZ) 开始枚举
+        this.offsetX = -radiusX;
+        this.offsetY = -radiusY;
+        this.offsetZ = -radiusZ;
+    }
+
+    /**
+     * 每 tick 执行一步扫描，由 BukkitScheduler.runTaskTimer 周期调用
+     */
+    @Override
+    public void run() {
+        // 检查任务是否仍然有效
+        if (!registry.isValid(playerTask)) {
+            cancel();
+            return;
+        }
+
+        // 重新获取玩家，检查在线、世界和死亡状态
+        Player player = Bukkit.getPlayer(playerTask.getPlayerUuid());
+        if (player == null || !player.isOnline() || player.isDead()
+                || !player.getWorld().getUID().equals(playerTask.getWorldUuid())) {
+            cancel();
+            return;
+        }
+
+        World world = player.getWorld();
+        int centerX = playerTask.getCenterX();
+        int centerY = playerTask.getCenterY();
+        int centerZ = playerTask.getCenterZ();
+
+        long blocksPerTick = playerTask.getConfigSnapshot().getScanBlocksPerTick();
+        long nanosPerTick = playerTask.getConfigSnapshot().getScanNanosPerTick();
+        long tickStart = System.nanoTime();
+        long blocksChecked = 0;
+
+        // 在预算内推进坐标枚举
+        while (!finished) {
+            // 检查预算（方块数和纳秒数双限制）
+            if (blocksChecked >= blocksPerTick || System.nanoTime() - tickStart >= nanosPerTick) {
+                // 预算耗尽，下个 tick 继续
+                return;
+            }
+
+            int blockX = centerX + offsetX;
+            int blockY = centerY + offsetY;
+            int blockZ = centerZ + offsetZ;
+
+            // 裁剪 Y 到世界合法高度范围，跳过越界坐标
+            if (blockY >= world.getMinHeight() && blockY < world.getMaxHeight()) {
+                // 检查区块是否已加载，不加载新区块
+                if (world.isChunkLoaded(blockX >> 4, blockZ >> 4)) {
+                    Block block = world.getBlockAt(blockX, blockY, blockZ);
+                    checkBlock(block, world, centerX, centerY, centerZ, player);
+                }
+            }
+
+            blocksChecked++;
+
+            // 推进三维坐标枚举：Z 最快，Y 次之，X 最慢
+            offsetZ++;
+            if (offsetZ > radiusZ) {
+                offsetZ = -radiusZ;
+                offsetY++;
+                if (offsetY > radiusY) {
+                    offsetY = -radiusY;
+                    offsetX++;
+                    if (offsetX > radiusX) {
+                        // 枚举完毕
+                        finished = true;
+                    }
+                }
+            }
+        }
+
+        // 扫描完成，按距离排序后回调
+        List<ContainerIdentity> sorted = new ArrayList<>(found.values());
+        sorted.sort(ContainerIdentity.BY_DISTANCE_THEN_KEY);
+        onComplete.accept(sorted);
+    }
+
+    /**
+     * 检查单个方块是否为可参与补货的容器
+     *
+     * @param block   目标方块
+     * @param world   世界
+     * @param cx      扫描中心 X
+     * @param cy      扫描中心 Y
+     * @param cz      扫描中心 Z
+     * @param player  执行操作的玩家
+     */
+    private void checkBlock(Block block, World world, int cx, int cy, int cz, Player player) {
+        BlockState state = block.getState();
+
+        // 仅处理 Chest（含陷阱箱）和 Barrel
+        if (!(state instanceof org.bukkit.block.Barrel)
+                && !(state instanceof Chest)) {
+            return;
+        }
+
+        ContainerIdentity identity;
+
+        if (state instanceof Chest chest) {
+            InventoryHolder holder = chest.getInventory().getHolder();
+
+            if (holder instanceof DoubleChest doubleChest) {
+                // 双箱：解析两半坐标，两半区块均需已加载
+                org.bukkit.inventory.InventoryHolder leftHolder = doubleChest.getLeftSide();
+                org.bukkit.inventory.InventoryHolder rightHolder = doubleChest.getRightSide();
+
+                if (!(leftHolder instanceof Chest leftChest)
+                        || !(rightHolder instanceof Chest rightChest)) {
+                    return;
+                }
+
+                Block leftBlock = leftChest.getBlock();
+                Block rightBlock = rightChest.getBlock();
+
+                // 检查双箱两半区块均已加载
+                if (!world.isChunkLoaded(leftBlock.getX() >> 4, leftBlock.getZ() >> 4)
+                        || !world.isChunkLoaded(rightBlock.getX() >> 4, rightBlock.getZ() >> 4)) {
+                    return;
+                }
+
+                BlockPos posA = new BlockPos(world.getUID(), leftBlock.getX(), leftBlock.getY(), leftBlock.getZ());
+                BlockPos posB = new BlockPos(world.getUID(), rightBlock.getX(), rightBlock.getY(), rightBlock.getZ());
+                BlockPos center = new BlockPos(world.getUID(), cx, cy, cz);
+
+                long distSq = ContainerIdentity.computeDistanceSquared(center, posA, posB);
+                identity = new ContainerIdentity(posA, posB, distSq);
+            } else {
+                // 单箱
+                BlockPos pos = new BlockPos(world.getUID(), block.getX(), block.getY(), block.getZ());
+                BlockPos center = new BlockPos(world.getUID(), cx, cy, cz);
+                identity = new ContainerIdentity(pos, pos.distanceSquared(center));
+            }
+        } else {
+            // 木桶（Barrel）
+            BlockPos pos = new BlockPos(world.getUID(), block.getX(), block.getY(), block.getZ());
+            BlockPos center = new BlockPos(world.getUID(), cx, cy, cz);
+            identity = new ContainerIdentity(pos, pos.distanceSquared(center));
+        }
+
+        // 去重：已发现过的容器直接跳过
+        String key = identity.canonicalKey();
+        if (found.containsKey(key)) {
+            return;
+        }
+
+        // Hook 检查：构建方块数组并检查访问权限
+        try {
+            Block[] blocks = buildBlocks(identity, world);
+            if (blocks == null) {
+                return;
+            }
+            if (accessPolicy.canAccess(player, blocks)) {
+                found.put(key, identity);
+            }
+        } catch (HookUnavailableException e) {
+            // Hook 不可用时中止整个扫描，由上层命令层处理
+            cancel();
+        } catch (Exception e) {
+            // 喵~防御：其他异常静默跳过该容器
+            plugin.getLogger().warning("[AutoChest] 扫描时访问策略异常: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 根据容器身份构建对应的 Bukkit Block 数组
+     * 双箱两半区块若有任一未加载则返回 null
+     *
+     * @param identity 容器身份
+     * @param world    世界
+     * @return 方块数组，或 null 表示跳过
+     */
+    private Block[] buildBlocks(ContainerIdentity identity, World world) {
+        if (identity.isDoubleChest()) {
+            BlockPos p = identity.getPrimaryPos();
+            BlockPos s = identity.getSecondaryPos();
+            if (!world.isChunkLoaded(p.getX() >> 4, p.getZ() >> 4)
+                    || !world.isChunkLoaded(s.getX() >> 4, s.getZ() >> 4)) {
+                return null;
+            }
+            return new Block[]{
+                    world.getBlockAt(p.getX(), p.getY(), p.getZ()),
+                    world.getBlockAt(s.getX(), s.getY(), s.getZ())
+            };
+        } else {
+            BlockPos p = identity.getPrimaryPos();
+            if (!world.isChunkLoaded(p.getX() >> 4, p.getZ() >> 4)) {
+                return null;
+            }
+            return new Block[]{world.getBlockAt(p.getX(), p.getY(), p.getZ())};
+        }
+    }
+
+    /**
+     * 取消扫描任务并触发取消回调
+     */
+    private void cancel() {
+        finished = true;
+        onCancelled.run();
+    }
+}
