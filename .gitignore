@@ -1,0 +1,7 @@
+target/
+*.class
+*.jar
+!*-shaded.jar
+.idea/
+*.iml
+.vscode/

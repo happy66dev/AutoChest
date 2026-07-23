@@ -1,0 +1,33 @@
+# AutoChest 插件描述文件
+name: AutoChest
+version: '1.0.0'
+main: io.github.autochest.AutoChestPlugin
+api-version: '1.21'
+description: 类泰拉瑞亚附近容器双向补货插件
+
+# 可选依赖：插件未安装时对应 Hook 不启用，安装后自动激活
+softdepend:
+  - WorldGuard
+  - Towny
+  - ChestShop
+
+commands:
+  autochest:
+    description: AutoChest 主命令
+    aliases:
+      - ac
+    usage: /autochest <deposit|restock|reload>
+
+permissions:
+  # 存入附近箱子权限，默认所有玩家拥有
+  autochest.deposit:
+    description: 将主背包物品存入附近已有同类物品的容器
+    default: true
+  # 从附近箱子补货权限，默认所有玩家拥有
+  autochest.restock:
+    description: 从附近容器取出物品补满背包现有堆叠
+    default: true
+  # 重载配置权限，默认仅 OP 拥有
+  autochest.reload:
+    description: 重载 AutoChest 配置文件
+    default: op

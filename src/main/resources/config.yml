@@ -1,0 +1,55 @@
+# AutoChest 配置文件
+# 修改后使用 /autochest reload 生效（不影响运行中的任务）
+
+scan:
+  # 扫描范围：以玩家位置为中心，各轴正负方向的搜索格数
+  radius-x: 8
+  radius-y: 8
+  radius-z: 8
+  # 每 tick 最多扫描的方块数，防止单 tick 卡顿
+  blocks-per-tick: 512
+  # 每 tick 扫描最多占用的纳秒数（3ms = 3000000 ns）
+  nanos-per-tick: 3000000
+
+submit:
+  # 每 tick 最多提交的容器事务数
+  containers-per-tick: 16
+  # 每 tick 提交阶段最多占用的纳秒数
+  nanos-per-tick: 3000000
+
+cooldown:
+  # 存入命令冷却时间（毫秒）
+  deposit-ms: 5000
+  # 补货命令冷却时间（毫秒）
+  restock-ms: 3000
+
+executor:
+  # 异步规划线程池大小
+  pool-size: 2
+  # 异步规划有界队列容量，队列满时拒绝并提示服务器繁忙
+  queue-size: 64
+
+messages:
+  prefix: "&7[&bAutoChest&7] "
+  scan-started: "&7正在扫描附近容器..."
+  deposit-done: "&a已将 &e{items} &a个物品存入 &e{containers} &a个容器（跳过 &e{skipped} &a个）"
+  restock-done: "&a已从 &e{containers} &a个容器补充 &e{items} &a个物品（跳过 &e{skipped} &a个）"
+  no-match: "&7附近没有可匹配的容器"
+  cooldown: "&c操作冷却中，还需等待 &e{seconds} &c秒"
+  task-conflict: "&c当前有任务正在执行，请稍候"
+  server-busy: "&c服务器繁忙，请稍候再试"
+  hook-unavailable: "&c保护插件 &e{hook} &c检查不可用，操作已拒绝"
+  cancelled: "&7操作已取消"
+  internal-error: "&c操作失败，请联系管理员"
+
+sounds:
+  # 扫描开始音效（留空则不播放）
+  scan-started: "BLOCK_CHEST_OPEN"
+  # 操作成功音效
+  success: "ENTITY_EXPERIENCE_ORB_PICKUP"
+  # 无匹配音效
+  no-match: "BLOCK_NOTE_BLOCK_BASS"
+  # 冷却/拒绝音效
+  denied: "ENTITY_VILLAGER_NO"
+  # 内部错误音效
+  error: "ENTITY_ITEM_BREAK"
