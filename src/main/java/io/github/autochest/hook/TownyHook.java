@@ -7,6 +7,7 @@ import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
 
 import java.lang.reflect.Method;
+import java.util.List;
 import java.util.logging.Logger;
 
 /**
@@ -18,6 +19,14 @@ public class TownyHook implements ContainerAccessPolicy {
 
     /** Hook 名称 */
     private static final String HOOK_NAME = "Towny";
+
+    /** 当前 Towny API 首选权限动作枚举类 */
+    private static final String CURRENT_ACTION_TYPE_CLASS =
+            "com.palmergames.bukkit.towny.object.TownyPermission$ActionType";
+
+    /** 历史或非标准 Towny 分支的权限动作枚举类回退路径 */
+    private static final String LEGACY_ACTION_TYPE_CLASS =
+            "com.palmergames.bukkit.towny.object.TownBlockPermissions$ActionType";
 
     /** 是否已安装（插件存在于服务器） */
     private boolean installed = false;
@@ -35,23 +44,23 @@ public class TownyHook implements ContainerAccessPolicy {
      */
     public TownyHook(Logger logger) {
         if (Bukkit.getPluginManager().getPlugin("Towny") == null) {
-            // Towny 未安装，静默跳过
             return;
         }
         installed = true;
         try {
             switchChecker = new SwitchChecker();
             available = true;
-            logger.info("[AutoChest] Towny Hook 已启用喵~");
-        } catch (Exception e) {
-            logger.severe("[AutoChest] Towny Hook 初始化失败，deposit/restock 将被禁用: " + e.getMessage());
+            logger.info("[AutoChest] Towny Hook 已启用喵~ ActionType="
+                    + switchChecker.getActionTypeClassName());
+        } catch (Exception exception) {
+            logger.severe("[AutoChest] Towny Hook 初始化失败，deposit/restock 将被禁用: "
+                    + exception.getMessage());
             available = false;
         }
     }
 
     @Override
     public boolean canAccess(Player player, Block... blocks) {
-        // 双箱检查两半，任一被拒绝则排除整个容器
         for (Block block : blocks) {
             if (!switchChecker.canSwitch(player, block)) {
                 return false;
@@ -86,17 +95,37 @@ public class TownyHook implements ContainerAccessPolicy {
         /** 反射缓存：ActionType.SWITCH 枚举常量 */
         private final Object switchActionType;
 
+        /** 实际命中的 Towny 权限动作枚举类名 */
+        private final String actionTypeClassName;
+
         SwitchChecker() throws Exception {
-            // 获取 PlayerCacheUtil.getCachePermission 方法
             Class<?> cacheUtilClass = Class.forName(
                     "com.palmergames.bukkit.towny.utils.PlayerCacheUtil");
-            Class<?> actionTypeClass = Class.forName(
-                    "com.palmergames.bukkit.towny.object.TownBlockPermissions$ActionType");
-            getCachePermission = cacheUtilClass.getMethod(
-                    "getCachePermission", Player.class, Location.class, Material.class, actionTypeClass);
-
-            // 获取 ActionType.SWITCH 枚举常量
-            switchActionType = Enum.valueOf((Class<Enum>) actionTypeClass, "SWITCH");
+            Exception lastFailure = null;
+            Method resolvedPermissionMethod = null;
+            Object resolvedSwitchActionType = null;
+            String resolvedActionTypeClassName = null;
+            for (String candidateClassName : List.of(CURRENT_ACTION_TYPE_CLASS, LEGACY_ACTION_TYPE_CLASS)) {
+                try {
+                    Class<?> candidateActionTypeClass = Class.forName(candidateClassName);
+                    resolvedPermissionMethod = cacheUtilClass.getMethod(
+                            "getCachePermission", Player.class, Location.class, Material.class,
+                            candidateActionTypeClass);
+                    resolvedSwitchActionType = Enum.valueOf(
+                            (Class<Enum>) candidateActionTypeClass, "SWITCH");
+                    resolvedActionTypeClassName = candidateClassName;
+                    break;
+                } catch (Exception exception) {
+                    lastFailure = exception;
+                }
+            }
+            if (resolvedPermissionMethod == null || resolvedSwitchActionType == null
+                    || resolvedActionTypeClassName == null) {
+                throw new IllegalStateException("未找到兼容的 Towny ActionType 与 getCachePermission 签名", lastFailure);
+            }
+            getCachePermission = resolvedPermissionMethod;
+            switchActionType = resolvedSwitchActionType;
+            actionTypeClassName = resolvedActionTypeClassName;
         }
 
         /**
@@ -111,11 +140,19 @@ public class TownyHook implements ContainerAccessPolicy {
                 Object result = getCachePermission.invoke(
                         null, player, block.getLocation(), block.getType(), switchActionType);
                 return Boolean.TRUE.equals(result);
-            } catch (Exception e) {
-                // 喵~防御：反射调用失败时保守返回 false（拒绝访问）
+            } catch (Exception exception) {
+                // 喵~防御：反射调用失败时保守返回 false，拒绝访问。
                 return false;
             }
         }
+
+        /**
+         * 获取实际命中的权限动作枚举类名
+         *
+         * @return Towny 反射兼容路径
+         */
+        String getActionTypeClassName() {
+            return actionTypeClassName;
+        }
     }
 }
-
