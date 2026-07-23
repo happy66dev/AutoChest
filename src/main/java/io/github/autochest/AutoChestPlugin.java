@@ -37,7 +37,7 @@ public class AutoChestPlugin extends JavaPlugin {
     /** 玩家任务注册表 */
     private PlayerTaskRegistry taskRegistry;
 
-    /** 复合容器访问策略（聚合三个可选 Hook） */
+    /** 复合容器访问策略（聚合 WorldGuard、Towny、ChestShop、Slimefun 四个可选 Hook） */
     private CompositeAccessPolicy accessPolicy;
 
     /**
@@ -83,6 +83,8 @@ public class AutoChestPlugin extends JavaPlugin {
         policies.add(new WorldGuardHook(getLogger()));
         policies.add(new TownyHook(getLogger()));
         policies.add(new ChestShopHook(getLogger()));
+        // 添加 Slimefun 机器与方块数据保护策略，避免自动访问其管理的容器。
+        policies.add(new SlimefunHook(getLogger()));
         accessPolicy = new CompositeAccessPolicy(policies, getLogger());
 
         // 步骤 7：注册事件监听器

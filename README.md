@@ -9,7 +9,7 @@ AutoChest 是一个为 Minecraft 服务器设计的附近容器整理插件，�
 - 服务端核心：Paper `1.21.4` 喵~
 - Java：`21` 喵~
 - 不保证 Spigot、Bukkit、Purpur 或其他核心的兼容性喵~
-- 可选保护插件：WorldGuard 7、Towny、ChestShop 喵~
+- 可选保护插件：WorldGuard 7、Towny、ChestShop、Slimefun 喵~
 
 ## 功能
 
@@ -54,6 +54,7 @@ AutoChest 是一个为 Minecraft 服务器设计的附近容器整理插件，�
 - WorldGuard：任意非 `__global__` 区域内的容器会被排除喵~
 - Towny：按照 Towny 的 `SWITCH` 权限判断容器访问喵~
 - ChestShop：商店箱会被排除喵~
+- Slimefun：带有 Slimefun 方块数据的容器会被排除；双箱任一半命中时整箱跳过；当前通过 `BlockStorage.hasBlockInfo(Block)` 兼容 API 识别，升级 Slimefun 时请复验喵~
 - 已安装保护插件但 Hook 无法初始化时，插件会拒绝存入和补货操作，避免绕过保护喵~
 
 ## 构建
@@ -72,7 +73,8 @@ mvn clean package
 - deposit 的先填满已有堆叠、再使用空槽逻辑喵~
 - restock 期间玩家点击、拖拽、丢弃或拾取物品后的目标槽失效行为喵~
 - 容器被破坏、替换、双箱拆分或重新配对时应安全跳过喵~
-- WorldGuard、Towny、ChestShop 的实际保护规则喵~
+- WorldGuard、Towny、ChestShop、Slimefun 的实际保护规则喵~
+- Slimefun 容器与双箱任一半带有 Slimefun 方块数据时的排除行为喵~
 
 ## 许可证
 

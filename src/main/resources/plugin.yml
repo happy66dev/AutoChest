@@ -10,6 +10,8 @@ softdepend:
   - WorldGuard
   - Towny
   - ChestShop
+  # 粘液科技可选依赖，存在 Slimefun 方块数据的目标容器会被自动排除
+  - Slimefun
 
 commands:
   autochest:
