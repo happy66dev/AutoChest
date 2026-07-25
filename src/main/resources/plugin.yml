@@ -18,7 +18,7 @@ commands:
     description: AutoChest 主命令
     aliases:
       - ac
-    usage: /autochest <deposit|restock|reload>
+    usage: /autochest <deposit|restock|config|reload>
 
 permissions:
   # 存入附近箱子权限，默认所有玩家拥有
@@ -28,6 +28,10 @@ permissions:
   # 从附近箱子补货权限，默认所有玩家拥有
   autochest.restock:
     description: 从附近容器取出物品补满背包现有堆叠
+    default: true
+  # 玩家管理自己 deposit/restock 容器偏好的权限，默认所有玩家拥有
+  autochest.config:
+    description: 管理个人容器黑名单和优先级配置
     default: true
   # 重载配置权限，默认仅 OP 拥有
   autochest.reload:

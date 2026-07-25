@@ -5,6 +5,7 @@ import io.github.autochest.config.AutoChestConfig;
 import io.github.autochest.config.CooldownService;
 import io.github.autochest.config.MessageService;
 import io.github.autochest.hook.*;
+import io.github.autochest.preference.PlayerPreferencesService;
 import io.github.autochest.scan.CandidatePlanner;
 import io.github.autochest.scan.InventorySnapshotFactory;
 import io.github.autochest.service.ContainerTransaction;
@@ -36,6 +37,9 @@ public class AutoChestPlugin extends JavaPlugin {
 
     /** 玩家任务注册表 */
     private PlayerTaskRegistry taskRegistry;
+
+    /** 玩家容器偏好服务，负责 JSON 持久化与不可变任务快照 */
+    private PlayerPreferencesService playerPreferencesService;
 
     /** 复合容器访问策略（聚合 WorldGuard、Towny、ChestShop、Slimefun 四个可选 Hook） */
     private CompositeAccessPolicy accessPolicy;
@@ -74,9 +78,11 @@ public class AutoChestPlugin extends JavaPlugin {
         // 步骤 4：构造玩家任务注册表（初始 generation=1）
         taskRegistry = new PlayerTaskRegistry();
 
-        // 步骤 5：构造冷却服务和消息服务
+        // 步骤 5：构造冷却服务、消息服务和玩家 JSON 偏好服务。
         cooldownService = new CooldownService(currentConfig);
         messageService = new MessageService(currentConfig);
+        // 将玩家 JSON 数据固定保存到插件 data 目录，隔离全局 config.yml。
+        playerPreferencesService = new PlayerPreferencesService(getDataFolder().toPath().resolve("data"), getLogger());
 
         // 步骤 6：初始化可选 Hook，构造复合访问策略
         List<ContainerAccessPolicy> policies = new ArrayList<>();
@@ -108,7 +114,7 @@ public class AutoChestPlugin extends JavaPlugin {
                 this, taskRegistry, cooldownService, accessPolicy,
                 executor, snapshotFactory, candidatePlanner,
                 depositService, restockService, restockListener,
-                containerTransaction
+                containerTransaction, playerPreferencesService
         );
         getCommand("autochest").setExecutor(commandHandler);
         getCommand("autochest").setTabCompleter(commandHandler);
@@ -136,7 +142,12 @@ public class AutoChestPlugin extends JavaPlugin {
             }
         }
 
-        // 步骤 3：清空冷却记录
+        // 步骤 3：有界刷新玩家偏好 JSON，避免服务器关闭时丢失最后一次设置修改。
+        if (playerPreferencesService != null) {
+            playerPreferencesService.flushAndClose(2L);
+        }
+
+        // 步骤 4：清空冷却记录
         if (cooldownService != null) {
             cooldownService.clear();
         }

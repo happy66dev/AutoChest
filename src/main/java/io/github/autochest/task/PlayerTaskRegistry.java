@@ -1,6 +1,7 @@
 package io.github.autochest.task;
 
 import io.github.autochest.config.AutoChestConfig;
+import io.github.autochest.preference.OperationPreferencesSnapshot;
 
 import java.util.Optional;
 import java.util.UUID;
@@ -25,12 +26,32 @@ public class PlayerTaskRegistry {
     private volatile int pluginGeneration = 1;
 
     /**
+     * 使用默认玩家容器偏好创建任务，兼容未显式传入偏好快照的调用方。
+     *
+     * @param playerUuid 玩家 UUID
+     * @param type 操作类型
+     * @param configSnapshot 配置快照
+     * @param worldUuid 世界 UUID
+     * @param centerX 扫描中心 X
+     * @param centerY 扫描中心 Y
+     * @param centerZ 扫描中心 Z
+     * @return 成功则返回新任务，失败返回空
+     */
+    public Optional<PlayerTask> tryAcquire(UUID playerUuid, OperationType type,
+                                           AutoChestConfig configSnapshot, UUID worldUuid,
+                                           int centerX, int centerY, int centerZ) {
+        // 使用默认距离优先偏好，保持旧调用方的行为不变。
+        return tryAcquire(playerUuid, type, configSnapshot, OperationPreferencesSnapshot.defaults(),
+                worldUuid, centerX, centerY, centerZ);
+    }
+    /**
      * 尝试为指定玩家创建并注册新任务
      * 若该玩家已有运行中任务，返回 Optional.empty()
      *
      * @param playerUuid     玩家 UUID
      * @param type           操作类型
      * @param configSnapshot 配置快照
+     * @param preferencesSnapshot 玩家容器偏好快照
      * @param worldUuid      世界 UUID
      * @param centerX        扫描中心 X
      * @param centerY        扫描中心 Y
@@ -41,6 +62,7 @@ public class PlayerTaskRegistry {
             UUID playerUuid,
             OperationType type,
             AutoChestConfig configSnapshot,
+            OperationPreferencesSnapshot preferencesSnapshot,
             UUID worldUuid,
             int centerX,
             int centerY,
@@ -52,7 +74,7 @@ public class PlayerTaskRegistry {
 
         PlayerTask newTask = new PlayerTask(
                 playerUuid, token, epoch, pluginGeneration,
-                type, configSnapshot, worldUuid, centerX, centerY, centerZ
+                type, configSnapshot, preferencesSnapshot, worldUuid, centerX, centerY, centerZ
         );
 
         // CAS 插入：若已存在任务则插入失败，返回 empty

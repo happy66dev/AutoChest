@@ -37,7 +37,27 @@ AutoChest 是一个为 Minecraft 服务器设计的附近容器整理插件，�
 | --- | --- | --- |
 | `/autochest deposit` | `autochest.deposit` | 存入主背包物品 |
 | `/autochest restock` | `autochest.restock` | 补满已有物品堆叠 |
+| `/autochest config ...` | `autochest.config` | 管理个人容器偏好 |
 | `/autochest reload` | `autochest.reload` | 重载插件配置 |
+
+## 玩家容器偏好
+
+玩家可通过 `/ac config` 分别设置 deposit 与 restock 的容器种类偏好喵~
+
+- `mode distance`：按距离优先，保持默认行为喵~
+- `mode priority`：先按玩家调整的容器种类优先级，再按同种距离处理喵~
+- 每项操作都有独立的黑名单、模式和优先级列表喵~
+- 可配置种类：`chest`、`trapped_chest`、`barrel`、`shulker_box`、`ender_chest`，17 种潜影盒统一使用 `shulker_box` 喵~
+- 数据会持久化到 `plugins/AutoChest/data/players/<UUID>.json` 喵~
+
+常用命令喵~
+
+```text
+/ac config deposit mode priority
+/ac config restock blacklist add ender_chest
+/ac config deposit priority move shulker_box up
+/ac config restock priority list
+```
 
 ## 配置概要
 

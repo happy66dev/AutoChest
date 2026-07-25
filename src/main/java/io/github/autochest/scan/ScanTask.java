@@ -177,9 +177,9 @@ public class ScanTask implements Runnable {
             }
         }
 
-        // 扫描完成，按距离排序后回调
-        List<ContainerIdentity> sorted = new ArrayList<>(found.values());
-        sorted.sort(ContainerIdentity.BY_DISTANCE_THEN_KEY);
+        // 扫描完成，按本次任务冻结的玩家偏好过滤并稳定排序后回调。
+        List<ContainerIdentity> sorted = ContainerOrdering.order(
+                new ArrayList<>(found.values()), playerTask.getPreferencesSnapshot());
         onComplete.accept(sorted);
     }
 
@@ -257,6 +257,11 @@ public class ScanTask implements Runnable {
                 return;
             }
             identity = new ContainerIdentity(pos, containerType, pos.distanceSquared(center));
+        }
+
+        // 玩家黑名单优先于保护 Hook，避免对被明确排除种类执行无意义检查。
+        if (!playerTask.getPreferencesSnapshot().allows(identity.getContainerType())) {
+            return;
         }
 
         // 去重：已发现过的容器直接跳过

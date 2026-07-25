@@ -1,6 +1,7 @@
 package io.github.autochest.task;
 
 import io.github.autochest.config.AutoChestConfig;
+import io.github.autochest.preference.OperationPreferencesSnapshot;
 
 import java.util.UUID;
 
@@ -28,6 +29,9 @@ public final class PlayerTask {
     /** 创建此任务时的配置快照，reload 不影响运行中任务 */
     private final AutoChestConfig configSnapshot;
 
+    /** 本操作的不可变玩家容器偏好快照，运行中配置修改不影响该任务 */
+    private final OperationPreferencesSnapshot preferencesSnapshot;
+
     /** 任务开始时玩家所在世界的 UUID，用于检测换世界 */
     private final UUID worldUuid;
 
@@ -49,6 +53,7 @@ public final class PlayerTask {
      * @param pluginGeneration 当前插件 generation
      * @param type            操作类型
      * @param configSnapshot  配置快照
+     * @param preferencesSnapshot 玩家容器偏好快照
      * @param worldUuid       世界 UUID
      * @param centerX         扫描中心 X
      * @param centerY         扫描中心 Y
@@ -61,6 +66,7 @@ public final class PlayerTask {
             int pluginGeneration,
             OperationType type,
             AutoChestConfig configSnapshot,
+            OperationPreferencesSnapshot preferencesSnapshot,
             UUID worldUuid,
             int centerX,
             int centerY,
@@ -72,6 +78,10 @@ public final class PlayerTask {
         this.pluginGeneration = pluginGeneration;
         this.type = type;
         this.configSnapshot = configSnapshot;
+        // 喵~防御：空偏好快照回退默认配置，避免任务缺少容器筛选规则。
+        this.preferencesSnapshot = preferencesSnapshot == null
+                ? OperationPreferencesSnapshot.defaults()
+                : preferencesSnapshot;
         this.worldUuid = worldUuid;
         this.centerX = centerX;
         this.centerY = centerY;
@@ -84,6 +94,7 @@ public final class PlayerTask {
     public int getPluginGeneration() { return pluginGeneration; }
     public OperationType getType() { return type; }
     public AutoChestConfig getConfigSnapshot() { return configSnapshot; }
+    public OperationPreferencesSnapshot getPreferencesSnapshot() { return preferencesSnapshot; }
     public UUID getWorldUuid() { return worldUuid; }
     public int getCenterX() { return centerX; }
     public int getCenterY() { return centerY; }

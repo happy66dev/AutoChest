@@ -5,6 +5,9 @@ import io.github.autochest.config.CooldownService;
 import io.github.autochest.config.MessageService;
 import io.github.autochest.container.ContainerIdentity;
 import io.github.autochest.hook.CompositeAccessPolicy;
+import io.github.autochest.preference.ContainerOrderMode;
+import io.github.autochest.preference.OperationPreferencesSnapshot;
+import io.github.autochest.preference.PlayerPreferencesService;
 import io.github.autochest.scan.CandidatePlanner;
 import io.github.autochest.scan.CandidatePlanner.PlanResult;
 import io.github.autochest.scan.InventorySnapshotFactory;
@@ -45,6 +48,9 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
     /** 共享的容器事务执行器，供快照阶段和提交阶段复用 */
     private final ContainerTransaction containerTransaction;
 
+    /** 玩家容器偏好服务，负责独立操作配置和 JSON 保存 */
+    private final PlayerPreferencesService playerPreferencesService;
+
     /** 活跃的扫描 BukkitTask，UUID → BukkitTask；用于插件禁用时取消 */
     private final Map<UUID, BukkitTask> activeScanTasks = new HashMap<>();
 
@@ -62,6 +68,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
      * @param restockService       补货服务
      * @param restockListener      restock 槽位监听器
      * @param containerTransaction 共享的容器事务执行器
+     * @param playerPreferencesService 玩家容器偏好服务
      */
     public AutoChestCommand(
             AutoChestPlugin plugin,
@@ -74,7 +81,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
             DepositService depositService,
             RestockService restockService,
             RestockTargetListener restockListener,
-            ContainerTransaction containerTransaction
+            ContainerTransaction containerTransaction,
+            PlayerPreferencesService playerPreferencesService
     ) {
         this.plugin = plugin;
         this.registry = registry;
@@ -86,6 +94,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         this.restockService = restockService;
         this.restockListener = restockListener;
         this.containerTransaction = containerTransaction;
+        this.playerPreferencesService = playerPreferencesService;
     }
 
     @Override
@@ -101,6 +110,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         switch (sub) {
             case "deposit" -> handleDeposit(sender);
             case "restock" -> handleRestock(sender);
+            case "config" -> handleConfig(sender, args);
             case "reload" -> handleReload(sender);
             default -> sendHelp(sender);
         }
@@ -111,14 +121,17 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
             List<String> completions = new ArrayList<>();
-            for (String sub : List.of("deposit", "restock", "reload")) {
+            for (String sub : List.of("deposit", "restock", "config", "reload")) {
                 if (sub.startsWith(args[0].toLowerCase())) {
                     completions.add(sub);
                 }
             }
             return completions;
         }
-        return Collections.emptyList();
+        if (!args[0].equalsIgnoreCase("config")) {
+            return Collections.emptyList();
+        }
+        return completeConfig(args);
     }
 
     // ===== deposit =====
@@ -162,11 +175,16 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
             return;
         }
 
+        // 读取本次存入任务的不可变玩家偏好快照。
+        OperationPreferencesSnapshot preferencesSnapshot = playerPreferencesService.snapshot(
+                player.getUniqueId(), OperationType.DEPOSIT);
+
         // 尝试创建任务（CAS 插入，保证不竞争）
         Optional<PlayerTask> taskOpt = registry.tryAcquire(
                 player.getUniqueId(),
                 OperationType.DEPOSIT,
                 plugin.getCurrentConfig(),
+                preferencesSnapshot,
                 player.getWorld().getUID(),
                 player.getLocation().getBlockX(),
                 player.getLocation().getBlockY(),
@@ -230,10 +248,15 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         // 在创建任务前立即生成目标槽位白名单（命令接受时快照）
         RestockTargetWhitelist whitelist = new RestockTargetWhitelist(player);
 
+        // 读取本次补货任务的不可变玩家偏好快照。
+        OperationPreferencesSnapshot preferencesSnapshot = playerPreferencesService.snapshot(
+                player.getUniqueId(), OperationType.RESTOCK);
+
         Optional<PlayerTask> taskOpt = registry.tryAcquire(
                 player.getUniqueId(),
                 OperationType.RESTOCK,
                 plugin.getCurrentConfig(),
+                preferencesSnapshot,
                 player.getWorld().getUID(),
                 player.getLocation().getBlockX(),
                 player.getLocation().getBlockY(),
@@ -254,6 +277,225 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         messages.sendScanStarted(player);
 
         startRestockScan(task, whitelist);
+    }
+
+    // ===== player container preferences =====
+
+    /**
+     * 处理玩家独立的容器偏好配置命令。
+     *
+     * @param sender 命令发送者。
+     * @param args 完整命令参数。
+     */
+    private void handleConfig(CommandSender sender, String[] args) {
+        // 喵~防御：控制台没有玩家 UUID，不能管理玩家私有偏好。
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage("§c此配置命令只能由玩家使用喵~");
+            return;
+        }
+        // 检查玩家管理自身偏好的权限。
+        if (!player.hasPermission("autochest.config")) {
+            plugin.getMessageService().sendNoPermission(player);
+            return;
+        }
+        // 参数不足时显示配置用法。
+        if (args.length < 3) {
+            sendConfigHelp(player);
+            return;
+        }
+        // 解析独立目标操作。
+        OperationType operation = parseOperation(args[1]);
+        // 喵~防御：未知操作不修改内存或 JSON。
+        if (operation == null) {
+            sendConfigHelp(player);
+            return;
+        }
+        // 分发配置类别。
+        String category = args[2].toLowerCase(Locale.ROOT);
+        if (category.equals("mode") && args.length == 4) {
+            handleConfigMode(player, operation, args[3]);
+            return;
+        }
+        if (category.equals("blacklist")) {
+            handleConfigBlacklist(player, operation, args);
+            return;
+        }
+        if (category.equals("priority")) {
+            handleConfigPriority(player, operation, args);
+            return;
+        }
+        // 无法匹配的配置语法只显示帮助。
+        sendConfigHelp(player);
+    }
+
+    /** 处理排序模式修改。 */
+    private void handleConfigMode(Player player, OperationType operation, String value) {
+        // 解析玩家可读模式名称。
+        ContainerOrderMode mode = value.equalsIgnoreCase("distance") ? ContainerOrderMode.DISTANCE
+                : value.equalsIgnoreCase("priority") ? ContainerOrderMode.CONTAINER_PRIORITY : null;
+        // 喵~防御：非法模式不能写入偏好。
+        if (mode == null || !playerPreferencesService.setOrderMode(player.getUniqueId(), operation, mode)) {
+            player.sendMessage("§c模式无效或设置服务已关闭喵~");
+            return;
+        }
+        // 提示内存更新已经进入异步保存队列。
+        player.sendMessage("§a已设置 " + operation.name().toLowerCase(Locale.ROOT) + " 排序模式为 "
+                + value.toLowerCase(Locale.ROOT) + " 喵~");
+    }
+
+    /** 处理黑名单增删与查看。 */
+    private void handleConfigBlacklist(Player player, OperationType operation, String[] args) {
+        // 参数不足时展示当前黑名单，避免输入空种类。
+        if (args.length == 4 && args[3].equalsIgnoreCase("list")) {
+            OperationPreferencesSnapshot snapshot = playerPreferencesService.snapshot(player.getUniqueId(), operation);
+            player.sendMessage("§e" + operation.name().toLowerCase(Locale.ROOT) + " 黑名单: "
+                    + snapshot.getBlacklistedContainerTypes() + " 喵~");
+            return;
+        }
+        // 增删操作必须携带容器种类。
+        if (args.length != 5) {
+            sendConfigHelp(player);
+            return;
+        }
+        // 解析黑名单动作和种类。
+        boolean add = args[3].equalsIgnoreCase("add");
+        boolean remove = args[3].equalsIgnoreCase("remove");
+        ContainerIdentity.ContainerType type = parseContainerType(args[4]);
+        // 喵~防御：非法动作或种类不修改偏好。
+        if ((!add && !remove) || type == null) {
+            sendConfigHelp(player);
+            return;
+        }
+        // 写入独立操作黑名单。
+        boolean changed = playerPreferencesService.setBlacklisted(player.getUniqueId(), operation, type, add);
+        player.sendMessage(changed ? "§a黑名单已更新并进入保存队列喵~" : "§e黑名单没有变化喵~");
+    }
+
+    /** 处理优先级移动、重置与查看。 */
+    private void handleConfigPriority(Player player, OperationType operation, String[] args) {
+        // 查看当前完整优先级列表。
+        if (args.length == 4 && args[3].equalsIgnoreCase("list")) {
+            player.sendMessage("§e" + operation.name().toLowerCase(Locale.ROOT) + " 容器优先级: "
+                    + playerPreferencesService.snapshot(player.getUniqueId(), operation).getContainerTypePriority() + " 喵~");
+            return;
+        }
+        // 重置当前操作的优先级列表。
+        if (args.length == 4 && args[3].equalsIgnoreCase("reset")) {
+            playerPreferencesService.resetPriority(player.getUniqueId(), operation);
+            player.sendMessage("§a容器优先级已重置并进入保存队列喵~");
+            return;
+        }
+        // 移动需包含种类和方向。
+        if (args.length != 6 || !args[3].equalsIgnoreCase("move")) {
+            sendConfigHelp(player);
+            return;
+        }
+        // 解析目标种类与上/下方向。
+        ContainerIdentity.ContainerType type = parseContainerType(args[4]);
+        boolean up = args[5].equalsIgnoreCase("up");
+        boolean down = args[5].equalsIgnoreCase("down");
+        // 喵~防御：非法方向或种类不改变优先级。
+        if (type == null || (!up && !down)) {
+            sendConfigHelp(player);
+            return;
+        }
+        // 仅实际发生相邻移动时持久化。
+        boolean changed = playerPreferencesService.movePriority(player.getUniqueId(), operation, type, up);
+        player.sendMessage(changed ? "§a容器优先级已移动并进入保存队列喵~" : "§e该容器已在优先级边界喵~");
+    }
+
+    /** 将命令字符串解析为操作类型。 */
+    private OperationType parseOperation(String value) {
+        // deposit 映射存入操作。
+        if (value.equalsIgnoreCase("deposit")) {
+            return OperationType.DEPOSIT;
+        }
+        // restock 映射补货操作。
+        if (value.equalsIgnoreCase("restock")) {
+            return OperationType.RESTOCK;
+        }
+        // 其他字符串不是有效操作。
+        return null;
+    }
+
+    /** 将命令字符串解析为容器种类。 */
+    private ContainerIdentity.ContainerType parseContainerType(String value) {
+        // 喵~防御：空字符串不能映射容器种类。
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            // 统一处理小写、连字符和下划线输入格式。
+            return ContainerIdentity.ContainerType.valueOf(value.toUpperCase(Locale.ROOT).replace('-', '_'));
+        } catch (IllegalArgumentException exception) {
+            // 喵~防御：未知容器种类不触发任何偏好修改。
+            return null;
+        }
+    }
+
+    /** 返回配置命令帮助。 */
+    private void sendConfigHelp(Player player) {
+        // 输出一行精简但完整的配置语法。
+        player.sendMessage("§e/ac config <deposit|restock> mode <distance|priority> | blacklist <add|remove|list> [type] | priority <list|reset|move <type> <up|down>> 喵~");
+    }
+
+    /** 按参数层级补全配置命令。 */
+    private List<String> completeConfig(String[] args) {
+        // 第二参数补全独立目标操作。
+        if (args.length == 2) {
+            return filterCompletions(args[1], List.of("deposit", "restock"));
+        }
+        // 第三参数补全配置类别。
+        if (args.length == 3) {
+            return filterCompletions(args[2], List.of("mode", "blacklist", "priority"));
+        }
+        // 模式类别补全两个模式名称。
+        if (args.length == 4 && args[2].equalsIgnoreCase("mode")) {
+            return filterCompletions(args[3], List.of("distance", "priority"));
+        }
+        // 黑名单第四参数补全动作。
+        if (args.length == 4 && args[2].equalsIgnoreCase("blacklist")) {
+            return filterCompletions(args[3], List.of("add", "remove", "list"));
+        }
+        // 黑名单第五参数补全固定容器种类。
+        if (args.length == 5 && args[2].equalsIgnoreCase("blacklist")) {
+            return filterCompletions(args[4], containerTypeNames());
+        }
+        // 优先级第四参数补全动作。
+        if (args.length == 4 && args[2].equalsIgnoreCase("priority")) {
+            return filterCompletions(args[3], List.of("list", "reset", "move"));
+        }
+        // 优先级移动的第五参数补全容器种类。
+        if (args.length == 5 && args[2].equalsIgnoreCase("priority") && args[3].equalsIgnoreCase("move")) {
+            return filterCompletions(args[4], containerTypeNames());
+        }
+        // 优先级移动的第六参数补全方向。
+        if (args.length == 6 && args[2].equalsIgnoreCase("priority") && args[3].equalsIgnoreCase("move")) {
+            return filterCompletions(args[5], List.of("up", "down"));
+        }
+        // 其余层级没有安全补全项。
+        return Collections.emptyList();
+    }
+
+    /** 返回玩家可配置的容器种类命令名称。 */
+    private List<String> containerTypeNames() {
+        // 返回与 ContainerType 枚举一一对应的稳定小写名称。
+        return List.of("chest", "trapped_chest", "barrel", "shulker_box", "ender_chest");
+    }
+
+    /** 按前缀过滤补全列表。 */
+    private List<String> filterCompletions(String prefix, List<String> values) {
+        // 将空前缀规范为可匹配全部的空字符串。
+        String normalizedPrefix = prefix == null ? "" : prefix.toLowerCase(Locale.ROOT);
+        // 收集前缀匹配项。
+        List<String> results = new ArrayList<>();
+        for (String value : values) {
+            if (value.startsWith(normalizedPrefix)) {
+                results.add(value);
+            }
+        }
+        // 返回稳定顺序结果。
+        return results;
     }
 
     // ===== reload =====

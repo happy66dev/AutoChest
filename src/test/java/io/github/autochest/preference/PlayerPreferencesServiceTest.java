@@ -1,0 +1,64 @@
+package io.github.autochest.preference;
+
+import io.github.autochest.container.ContainerIdentity;
+import io.github.autochest.task.OperationType;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.nio.file.Path;
+import java.util.UUID;
+import java.util.logging.Logger;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * 玩家 JSON 偏好服务测试。
+ * 验证两项操作独立保存并可由新服务实例恢复。
+ */
+class PlayerPreferencesServiceTest {
+
+    /**
+     * deposit 与 restock 的黑名单和排序模式必须独立持久化。
+     *
+     * @param temporaryDirectory JUnit 提供的独立临时目录。
+     */
+    @Test
+    void preferences_jsonRoundTripKeepsDepositAndRestockIndependent(@TempDir Path temporaryDirectory) {
+        // 创建用于首次写入的偏好服务。
+        PlayerPreferencesService savingService = new PlayerPreferencesService(
+                temporaryDirectory.resolve("data"), Logger.getLogger("PlayerPreferencesServiceTest"));
+        // 创建稳定玩家 UUID。
+        UUID playerUuid = UUID.randomUUID();
+        // 为 deposit 设置容器优先模式。
+        assertTrue(savingService.setOrderMode(playerUuid, OperationType.DEPOSIT,
+                ContainerOrderMode.CONTAINER_PRIORITY));
+        // 仅向 deposit 黑名单加入木桶。
+        assertTrue(savingService.setBlacklisted(playerUuid, OperationType.DEPOSIT,
+                ContainerIdentity.ContainerType.BARREL, true));
+        // 仅向 restock 黑名单加入末影箱。
+        assertTrue(savingService.setBlacklisted(playerUuid, OperationType.RESTOCK,
+                ContainerIdentity.ContainerType.ENDER_CHEST, true));
+        // 等待所有 JSON 写入任务完成。
+        savingService.flushAndClose(5L);
+
+        // 创建新服务实例模拟服务器重启后的重新加载。
+        PlayerPreferencesService loadingService = new PlayerPreferencesService(
+                temporaryDirectory.resolve("data"), Logger.getLogger("PlayerPreferencesServiceTest"));
+        // 分别读取两项操作快照。
+        OperationPreferencesSnapshot depositSnapshot = loadingService.snapshot(playerUuid, OperationType.DEPOSIT);
+        OperationPreferencesSnapshot restockSnapshot = loadingService.snapshot(playerUuid, OperationType.RESTOCK);
+
+        // 验证 deposit 的模式和黑名单被准确恢复。
+        assertEquals(ContainerOrderMode.CONTAINER_PRIORITY, depositSnapshot.getOrderMode());
+        assertFalse(depositSnapshot.allows(ContainerIdentity.ContainerType.BARREL));
+        // 验证 restock 没有继承 deposit 的排序模式或黑名单。
+        assertEquals(ContainerOrderMode.DISTANCE, restockSnapshot.getOrderMode());
+        assertTrue(restockSnapshot.allows(ContainerIdentity.ContainerType.BARREL));
+        // 验证 restock 的独立黑名单被准确恢复。
+        assertFalse(restockSnapshot.allows(ContainerIdentity.ContainerType.ENDER_CHEST));
+        // 关闭第二个服务，释放后台线程。
+        loadingService.flushAndClose(5L);
+    }
+}

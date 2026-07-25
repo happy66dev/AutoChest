@@ -84,6 +84,13 @@
         </dependency>
         -->
 
+        <!-- Gson 用于玩家偏好 JSON 持久化，打包时 relocate 避免与其他插件冲突 -->
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.11.0</version>
+        </dependency>
+
         <!-- JUnit 5 测试框架 -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -135,6 +142,30 @@
                         </manifest>
                     </archive>
                 </configuration>
+            </plugin>
+
+            <!-- Shade 插件，将 Gson 隔离到 AutoChest 私有命名空间 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.3</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <relocations>
+                                <relocation>
+                                    <pattern>com.google.gson</pattern>
+                                    <shadedPattern>io.github.autochest.libs.gson</shadedPattern>
+                                </relocation>
+                            </relocations>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
 
             <!-- Surefire 插件，支持 JUnit 5 -->
