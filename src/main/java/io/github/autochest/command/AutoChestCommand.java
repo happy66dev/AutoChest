@@ -5,6 +5,7 @@ import io.github.autochest.config.CooldownService;
 import io.github.autochest.config.MessageService;
 import io.github.autochest.container.ContainerIdentity;
 import io.github.autochest.hook.CompositeAccessPolicy;
+import io.github.autochest.gui.PreferencesGui;
 import io.github.autochest.preference.ContainerOrderMode;
 import io.github.autochest.preference.OperationPreferencesSnapshot;
 import io.github.autochest.preference.PlayerPreferencesService;
@@ -51,6 +52,9 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
     /** 玩家容器偏好服务，负责独立操作配置和 JSON 保存 */
     private final PlayerPreferencesService playerPreferencesService;
 
+    /** 玩家容器偏好 GUI 开启器，保留文本命令作为并列入口 */
+    private final PreferencesGui preferencesGui;
+
     /** 活跃的扫描 BukkitTask，UUID → BukkitTask；用于插件禁用时取消 */
     private final Map<UUID, BukkitTask> activeScanTasks = new HashMap<>();
 
@@ -69,6 +73,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
      * @param restockListener      restock 槽位监听器
      * @param containerTransaction 共享的容器事务执行器
      * @param playerPreferencesService 玩家容器偏好服务
+     * @param preferencesGui 玩家容器偏好 GUI
      */
     public AutoChestCommand(
             AutoChestPlugin plugin,
@@ -82,7 +87,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
             RestockService restockService,
             RestockTargetListener restockListener,
             ContainerTransaction containerTransaction,
-            PlayerPreferencesService playerPreferencesService
+            PlayerPreferencesService playerPreferencesService,
+            PreferencesGui preferencesGui
     ) {
         this.plugin = plugin;
         this.registry = registry;
@@ -95,6 +101,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         this.restockListener = restockListener;
         this.containerTransaction = containerTransaction;
         this.playerPreferencesService = playerPreferencesService;
+        this.preferencesGui = preferencesGui;
     }
 
     @Override
@@ -297,6 +304,19 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         if (!player.hasPermission("autochest.config")) {
             plugin.getMessageService().sendNoPermission(player);
             return;
+        }
+        // 无参数时提供 GUI 主菜单入口。
+        if (args.length == 1) {
+            preferencesGui.openMain(player);
+            return;
+        }
+        // 单独指定操作时直接打开对应 GUI 页面，保留带后续参数的文本命令。
+        if (args.length == 2) {
+            OperationType directOperation = parseOperation(args[1]);
+            if (directOperation != null) {
+                preferencesGui.openOperation(player, directOperation);
+                return;
+            }
         }
         // 参数不足时显示配置用法。
         if (args.length < 3) {
@@ -784,6 +804,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage("§b[AutoChest] §7用法：");
         sender.sendMessage("§e/autochest deposit §7- 将背包物品存入附近箱子");
         sender.sendMessage("§e/autochest restock §7- 从附近箱子补充背包物品");
+        sender.sendMessage("§e/autochest config §7- 打开个人容器偏好设置界面");
         sender.sendMessage("§e/autochest reload §7- 重载配置文件");
     }
 }

@@ -5,6 +5,9 @@ import io.github.autochest.config.AutoChestConfig;
 import io.github.autochest.config.CooldownService;
 import io.github.autochest.config.MessageService;
 import io.github.autochest.hook.*;
+import io.github.autochest.gui.PreferencesGui;
+import io.github.autochest.gui.PreferencesGuiListener;
+import io.github.autochest.gui.PreferencesGuiSessionRegistry;
 import io.github.autochest.preference.PlayerPreferencesService;
 import io.github.autochest.scan.CandidatePlanner;
 import io.github.autochest.scan.InventorySnapshotFactory;
@@ -40,6 +43,9 @@ public class AutoChestPlugin extends JavaPlugin {
 
     /** 玩家容器偏好服务，负责 JSON 持久化与不可变任务快照 */
     private PlayerPreferencesService playerPreferencesService;
+
+    /** 玩家容器偏好 GUI 监听器，用于插件停用时使会话失效 */
+    private PreferencesGuiListener preferencesGuiListener;
 
     /** 复合容器访问策略（聚合 WorldGuard、Towny、ChestShop、Slimefun 四个可选 Hook） */
     private CompositeAccessPolicy accessPolicy;
@@ -93,11 +99,16 @@ public class AutoChestPlugin extends JavaPlugin {
         policies.add(new SlimefunHook(getLogger()));
         accessPolicy = new CompositeAccessPolicy(policies, getLogger());
 
-        // 步骤 7：注册事件监听器
+        // 步骤 7：注册事件监听器。
         RestockTargetListener restockListener = new RestockTargetListener();
+        // 创建偏好 GUI 会话与渲染器，命令和库存事件共享同一偏好服务。
+        PreferencesGuiSessionRegistry preferencesGuiSessionRegistry = new PreferencesGuiSessionRegistry();
+        PreferencesGui preferencesGui = new PreferencesGui(playerPreferencesService, preferencesGuiSessionRegistry);
+        preferencesGuiListener = new PreferencesGuiListener(preferencesGui, preferencesGuiSessionRegistry);
         getServer().getPluginManager().registerEvents(
                 new PlayerLifecycleListener(taskRegistry), this);
         getServer().getPluginManager().registerEvents(restockListener, this);
+        getServer().getPluginManager().registerEvents(preferencesGuiListener, this);
 
         // 步骤 8：构造服务层
         InventorySnapshotFactory snapshotFactory = new InventorySnapshotFactory();
@@ -114,7 +125,7 @@ public class AutoChestPlugin extends JavaPlugin {
                 this, taskRegistry, cooldownService, accessPolicy,
                 executor, snapshotFactory, candidatePlanner,
                 depositService, restockService, restockListener,
-                containerTransaction, playerPreferencesService
+                containerTransaction, playerPreferencesService, preferencesGui
         );
         getCommand("autochest").setExecutor(commandHandler);
         getCommand("autochest").setTabCompleter(commandHandler);
@@ -142,12 +153,17 @@ public class AutoChestPlugin extends JavaPlugin {
             }
         }
 
-        // 步骤 3：有界刷新玩家偏好 JSON，避免服务器关闭时丢失最后一次设置修改。
+        // 步骤 3：使 GUI 会话失效，阻止迟到库存事件修改偏好。
+        if (preferencesGuiListener != null) {
+            preferencesGuiListener.disable();
+        }
+
+        // 步骤 4：有界刷新玩家偏好 JSON，避免服务器关闭时丢失最后一次设置修改。
         if (playerPreferencesService != null) {
             playerPreferencesService.flushAndClose(2L);
         }
 
-        // 步骤 4：清空冷却记录
+        // 步骤 5：清空冷却记录
         if (cooldownService != null) {
             cooldownService.clear();
         }

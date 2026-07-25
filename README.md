@@ -42,7 +42,10 @@ AutoChest 是一个为 Minecraft 服务器设计的附近容器整理插件，�
 
 ## 玩家容器偏好
 
-玩家可通过 `/ac config` 分别设置 deposit 与 restock 的容器种类偏好喵~
+玩家可通过 `/ac config` 打开 GUI 主菜单，也可继续使用文本命令分别设置 deposit 与 restock 的容器种类偏好喵~
+
+- `/ac config`：打开存入与补货设置 GUI 主菜单喵~
+- `/ac config deposit` 或 `/ac config restock`：直接打开对应设置页面喵~
 
 - `mode distance`：按距离优先，保持默认行为喵~
 - `mode priority`：先按玩家调整的容器种类优先级，再按同种距离处理喵~
