@@ -68,8 +68,20 @@ class ContainerIdentityTest {
     }
 
     /**
-     * 容器类型不参与规范键，保证位置去重和排序仍稳定
+     * 潜影盒和末影箱均不得构造为双箱，避免错误进入双箱实时校验分支。
      */
+    @Test
+    void doubleChest_shulkerAndEnderChestTypesAreRejected() {
+        BlockPos firstPosition = new BlockPos(WORLD, 0, 64, 0);
+        BlockPos secondPosition = new BlockPos(WORLD, 1, 64, 0);
+
+        assertThrows(IllegalArgumentException.class, () -> new ContainerIdentity(firstPosition, secondPosition,
+                ContainerIdentity.ContainerType.SHULKER_BOX, 100L));
+        assertThrows(IllegalArgumentException.class, () -> new ContainerIdentity(firstPosition, secondPosition,
+                ContainerIdentity.ContainerType.ENDER_CHEST, 100L));
+    }
+
+
     @Test
     void canonicalKey_isIndependentOfContainerType() {
         BlockPos position = new BlockPos(WORLD, 0, 64, 0);

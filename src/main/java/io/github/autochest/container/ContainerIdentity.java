@@ -16,7 +16,11 @@ public final class ContainerIdentity {
         /** 陷阱箱 */
         TRAPPED_CHEST,
         /** 木桶 */
-        BARREL;
+        BARREL,
+        /** 未染色或染色潜影盒 */
+        SHULKER_BOX,
+        /** 作为玩家私有末影箱库存入口的末影箱方块 */
+        ENDER_CHEST;
 
         /**
          * 判断该类型能否组成双箱

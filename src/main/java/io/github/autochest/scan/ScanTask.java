@@ -14,6 +14,8 @@ import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Chest;
 import org.bukkit.block.DoubleChest;
+import org.bukkit.block.EnderChest;
+import org.bukkit.block.ShulkerBox;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.plugin.Plugin;
@@ -194,9 +196,11 @@ public class ScanTask implements Runnable {
     private void checkBlock(Block block, World world, int cx, int cy, int cz, Player player) {
         BlockState state = block.getState();
 
-        // 仅处理 Chest（含陷阱箱）和 Barrel
+        // 仅处理普通箱、陷阱箱、木桶、潜影盒和末影箱。
         if (!(state instanceof org.bukkit.block.Barrel)
-                && !(state instanceof Chest)) {
+                && !(state instanceof Chest)
+                && !(state instanceof ShulkerBox)
+                && !(state instanceof EnderChest)) {
             return;
         }
 
@@ -245,11 +249,14 @@ public class ScanTask implements Runnable {
                 identity = new ContainerIdentity(pos, containerType, pos.distanceSquared(center));
             }
         } else {
-            // 木桶（Barrel）
+            // 潜影盒和末影箱均只能作为单方块容器处理。
             BlockPos pos = new BlockPos(world.getUID(), block.getX(), block.getY(), block.getZ());
             BlockPos center = new BlockPos(world.getUID(), cx, cy, cz);
-            identity = new ContainerIdentity(pos, ContainerIdentity.ContainerType.BARREL,
-                    pos.distanceSquared(center));
+            ContainerIdentity.ContainerType containerType = toContainerType(block.getType());
+            if (containerType == null) {
+                return;
+            }
+            identity = new ContainerIdentity(pos, containerType, pos.distanceSquared(center));
         }
 
         // 去重：已发现过的容器直接跳过
@@ -292,7 +299,28 @@ public class ScanTask implements Runnable {
         if (material == Material.BARREL) {
             return ContainerIdentity.ContainerType.BARREL;
         }
+        if (isShulkerBoxMaterial(material)) {
+            return ContainerIdentity.ContainerType.SHULKER_BOX;
+        }
+        if (material == Material.ENDER_CHEST) {
+            return ContainerIdentity.ContainerType.ENDER_CHEST;
+        }
         return null;
+    }
+
+    /**
+     * 判断材料是否为原版 17 种潜影盒之一。
+     *
+     * @param material 待判断的方块材料
+     * @return true 表示材料属于潜影盒系列
+     */
+    static boolean isShulkerBoxMaterial(Material material) {
+        // 喵~防御：空材料不能匹配任何潜影盒。
+        if (material == null) {
+            return false;
+        }
+        // 通过材料名称统一识别未染色与 16 种染色潜影盒，避免漏写颜色变体。
+        return material == Material.SHULKER_BOX || material.name().endsWith("_SHULKER_BOX");
     }
     /**
      * 根据容器身份构建对应的 Bukkit Block 数组

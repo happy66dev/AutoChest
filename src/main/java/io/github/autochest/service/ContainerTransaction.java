@@ -13,6 +13,8 @@ import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Chest;
 import org.bukkit.block.Container;
+import org.bukkit.block.EnderChest;
+import org.bukkit.block.ShulkerBox;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
@@ -148,7 +150,7 @@ public class ContainerTransaction {
 
         // 步骤 2：检查区块加载状态和容器结构。
         World world = player.getWorld();
-        Inventory inventory = getInventoryIfValid(identity, world);
+        Inventory inventory = getInventoryIfValid(identity, world, player);
         if (inventory == null) {
             return ValidationResult.invalid(Result.SKIPPED_CONTAINER_INVALID, player, null);
         }
@@ -437,10 +439,14 @@ public class ContainerTransaction {
      * 返回 null 表示容器失效
      *
      * @param identity 容器身份
-     * @param world    世界
+     * @param player   已验证的执行玩家，末影箱必须从其私有库存解析
      * @return 容器库存，或 null
      */
-    public Inventory getInventoryIfValid(ContainerIdentity identity, World world) {
+    public Inventory getInventoryIfValid(ContainerIdentity identity, World world, Player player) {
+        // 喵~防御：末影箱依赖执行玩家私有库存，任何空参数均不能继续解析。
+        if (identity == null || world == null || player == null) {
+            return null;
+        }
         BlockPos primaryPosition = identity.getPrimaryPos();
         if (!world.isChunkLoaded(primaryPosition.getX() >> 4, primaryPosition.getZ() >> 4)) {
             return null;
@@ -471,9 +477,13 @@ public class ContainerTransaction {
 
         Block block = world.getBlockAt(primaryPosition.getX(), primaryPosition.getY(), primaryPosition.getZ());
         BlockState state = block.getState();
-        if (block.getType() != toMaterial(identity.getContainerType())
+        if (!isExpectedSingleMaterial(block.getType(), identity.getContainerType())
                 || !isExpectedSingleContainer(state, identity.getContainerType())) {
             return null;
+        }
+        if (identity.getContainerType() == ContainerIdentity.ContainerType.ENDER_CHEST) {
+            // 末影箱方块仅作为入口，库存必须始终来自当前执行玩家的私有末影箱。
+            return player.getEnderChest();
         }
         return ((Container) state).getInventory();
     }
@@ -484,18 +494,42 @@ public class ContainerTransaction {
      * @param containerType 扫描时容器类型
      * @return 对应 Bukkit 材料
      */
-    private Material toMaterial(ContainerIdentity.ContainerType containerType) {
+    private static Material toMaterial(ContainerIdentity.ContainerType containerType) {
         return switch (containerType) {
             case CHEST -> Material.CHEST;
             case TRAPPED_CHEST -> Material.TRAPPED_CHEST;
             case BARREL -> Material.BARREL;
+            // 潜影盒颜色在提交阶段以完整白名单匹配，不映射单一 Material。
+            case SHULKER_BOX -> null;
+            case ENDER_CHEST -> Material.ENDER_CHEST;
         };
+    }
+
+    /**
+     * 验证单方块 Material 与扫描时容器类型一致。
+     *
+     * @param material 当前方块材料
+     * @param containerType 扫描时容器类型
+     * @return true 表示材料仍能安全提供该类型库存
+     */
+    static boolean isExpectedSingleMaterial(Material material,
+                                            ContainerIdentity.ContainerType containerType) {
+        // 喵~防御：空材料或类型无法证明容器没有被替换，保守拒绝。
+        if (material == null || containerType == null) {
+            return false;
+        }
+        // 潜影盒接受未染色和全部 16 种染色方块。
+        if (containerType == ContainerIdentity.ContainerType.SHULKER_BOX) {
+            return material == Material.SHULKER_BOX || material.name().endsWith("_SHULKER_BOX");
+        }
+        // 其他单方块容器要求与扫描类型映射的精确材料一致。
+        return material == toMaterial(containerType);
     }
 
     /**
      * 验证单容器状态与扫描时的精确容器类型一致
      *
-     * @param state         当前方块状态
+     * @param state 当前方块状态
      * @param containerType 扫描时容器类型
      * @return true 表示状态可安全提供同类库存
      */
@@ -504,6 +538,8 @@ public class ContainerTransaction {
         return switch (containerType) {
             case CHEST, TRAPPED_CHEST -> state instanceof Chest;
             case BARREL -> state instanceof org.bukkit.block.Barrel;
+            case SHULKER_BOX -> state instanceof ShulkerBox;
+            case ENDER_CHEST -> state instanceof EnderChest;
         };
     }
     /**

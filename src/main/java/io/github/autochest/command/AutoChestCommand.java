@@ -348,7 +348,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         // 主线程快照容器已有物品，用于限制 deposit 的快照候选资格。
         List<InventorySnapshotFactory.ContainerDto> containerDtos = new ArrayList<>();
         for (ContainerIdentity identity : containers) {
-            org.bukkit.inventory.Inventory inventory = getInventorySafely(identity, player.getWorld());
+            org.bukkit.inventory.Inventory inventory = getInventorySafely(identity, player.getWorld(), player);
             if (inventory != null) {
                 containerDtos.add(snapshotFactory.snapshotContainer(identity, inventory));
             }
@@ -520,13 +520,14 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
      * 快照阶段无需再次执行 Hook 检查，提交阶段的 validate() 会完整重验
      *
      * @param identity 容器身份
-     * @param world    世界
+     * @param world    目标世界
+     * @param player   执行命令的玩家，末影箱快照必须读取其私有库存
      * @return 库存，或 null
      */
     private org.bukkit.inventory.Inventory getInventorySafely(ContainerIdentity identity,
-                                                               org.bukkit.World world) {
+                                                               org.bukkit.World world, Player player) {
         try {
-            return containerTransaction.getInventoryIfValid(identity, world);
+            return containerTransaction.getInventoryIfValid(identity, world, player);
         } catch (Exception e) {
             return null;
         }

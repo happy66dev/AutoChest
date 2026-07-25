@@ -59,10 +59,43 @@ public class CandidatePlanner {
         if (identities == null || identities.isEmpty()) {
             return new PlanResult(List.of(), Map.of());
         }
-        return new PlanResult(new ArrayList<>(identities), Map.of());
+        List<ContainerIdentity> uniqueIdentities = retainFirstEnderChestEntrance(identities);
+        return new PlanResult(uniqueIdentities, Map.of());
     }
 
-
+    /**
+     * 保留已稳定排序候选中的第一个末影箱入口。
+     * 多个末影箱方块对应同一玩家私有库存，后续入口不得重复遍历。
+     *
+     * @param identities 已按距离和规范键排序的容器身份
+     * @return 保留最近末影箱入口后的容器身份列表
+     */
+    private List<ContainerIdentity> retainFirstEnderChestEntrance(List<ContainerIdentity> identities) {
+        // 创建结果列表，保持调用方提供的稳定候选顺序。
+        List<ContainerIdentity> uniqueIdentities = new ArrayList<>();
+        // 记录是否已保留一个指向玩家私有库存的末影箱入口。
+        boolean hasEnderChestEntrance = false;
+        // 依序遍历所有 Bukkit-free 容器身份。
+        for (ContainerIdentity identity : identities) {
+            // 喵~防御：空身份不能安全参与后续容器验证，直接跳过。
+            if (identity == null) {
+                continue;
+            }
+            // 仅允许排序最靠前的末影箱作为私有库存入口。
+            if (identity.getContainerType() == ContainerIdentity.ContainerType.ENDER_CHEST) {
+                // 已存在更近或规范键更小的末影箱入口时跳过当前入口。
+                if (hasEnderChestEntrance) {
+                    continue;
+                }
+                // 标记最近末影箱入口已被保留。
+                hasEnderChestEntrance = true;
+            }
+            // 保留普通容器、潜影盒及唯一的末影箱入口。
+            uniqueIdentities.add(identity);
+        }
+        // 返回与原候选相互独立的可变副本，构造 PlanResult 时会再冻结。
+        return uniqueIdentities;
+    }
     public PlanResult plan(List<ContainerDto> containers) {
         if (containers == null || containers.isEmpty()) {
             return new PlanResult(List.of(), Map.of());
@@ -70,9 +103,16 @@ public class CandidatePlanner {
 
         List<ContainerIdentity> sortedContainers = new ArrayList<>();
         Map<String, Set<String>> mutableCandidateKeys = new LinkedHashMap<>();
+        boolean hasEnderChestEntrance = false;
         for (ContainerDto container : containers) {
             if (container == null || container.identity == null) {
                 continue;
+            }
+            if (container.identity.getContainerType() == ContainerIdentity.ContainerType.ENDER_CHEST) {
+                if (hasEnderChestEntrance) {
+                    continue;
+                }
+                hasEnderChestEntrance = true;
             }
             sortedContainers.add(container.identity);
             for (String itemKey : container.itemKeys) {

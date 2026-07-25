@@ -62,6 +62,34 @@ class CandidatePlannerTest {
     }
 
     /**
+     * 多个末影箱入口指向同一玩家私有库存时，只能保留距离最近的入口。
+     */
+    @Test
+    void planAndRestockPlan_multipleEnderChestEntrances_keepOnlyNearest() {
+        UUID worldUuid = UUID.randomUUID();
+        ContainerIdentity nearestEnderChest = new ContainerIdentity(
+                new BlockPos(worldUuid, 1, 64, 0), ContainerIdentity.ContainerType.ENDER_CHEST, 1L);
+        ContainerIdentity ordinaryChest = new ContainerIdentity(
+                new BlockPos(worldUuid, 2, 64, 0), ContainerIdentity.ContainerType.CHEST, 4L);
+        ContainerIdentity fartherEnderChest = new ContainerIdentity(
+                new BlockPos(worldUuid, 3, 64, 0), ContainerIdentity.ContainerType.ENDER_CHEST, 9L);
+        ItemStack enderChestItem = mockStackWithSerializedIdentity(new byte[]{7, 8, 9});
+        String itemKey = InventorySnapshotFactory.itemKey(enderChestItem);
+        CandidatePlanner planner = new CandidatePlanner();
+
+        CandidatePlanner.PlanResult depositPlan = planner.plan(List.of(
+                new ContainerDto(nearestEnderChest, List.of(itemKey)),
+                new ContainerDto(ordinaryChest, List.of()),
+                new ContainerDto(fartherEnderChest, List.of(itemKey))));
+        CandidatePlanner.PlanResult restockPlan = planner.planForRestock(List.of(
+                nearestEnderChest, ordinaryChest, fartherEnderChest));
+
+        assertEquals(List.of(nearestEnderChest, ordinaryChest), depositPlan.sortedContainers);
+        assertTrue(depositPlan.isSnapshotCandidate(itemKey, nearestEnderChest));
+        assertFalse(depositPlan.isSnapshotCandidate(itemKey, fartherEnderChest));
+        assertEquals(List.of(nearestEnderChest, ordinaryChest), restockPlan.sortedContainers);
+    }
+    /**
      * 构造可被数量归一化序列化的物品 Mockito 替身
      *
      * @param serializedIdentity 归一化后的完整物品身份字节

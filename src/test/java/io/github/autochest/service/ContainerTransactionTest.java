@@ -1,9 +1,15 @@
 package io.github.autochest.service;
 
+import io.github.autochest.container.BlockPos;
+import io.github.autochest.container.ContainerIdentity;
 import io.github.autochest.hook.CompositeAccessPolicy;
 import io.github.autochest.hook.ContainerAccessPolicy;
 import io.github.autochest.task.PlayerTaskRegistry;
 import org.bukkit.Material;
+import org.bukkit.World;
+import org.bukkit.block.Block;
+import org.bukkit.block.EnderChest;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
@@ -11,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.UUID;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -72,6 +79,53 @@ class ContainerTransactionTest {
         assertSame(cloned, result, "cloneOrNull 应返回 item.clone() 的结果");
     }
 
+    /**
+     * 末影箱验证通过后必须返回执行玩家的私有库存，而非方块状态提供的库存。
+     */
+    @Test
+    void getInventoryIfValid_enderChestReturnsExecutingPlayersPrivateInventory() {
+        UUID worldUuid = UUID.randomUUID();
+        BlockPos enderChestPosition = new BlockPos(worldUuid, 0, 64, 0);
+        ContainerIdentity identity = new ContainerIdentity(enderChestPosition,
+                ContainerIdentity.ContainerType.ENDER_CHEST, 1L);
+        World world = mock(World.class);
+        Block block = mock(Block.class);
+        EnderChest enderChestState = mock(EnderChest.class);
+        Player player = mock(Player.class);
+        Inventory privateEnderChestInventory = mock(Inventory.class);
+        when(world.isChunkLoaded(0, 0)).thenReturn(true);
+        when(world.getBlockAt(0, 64, 0)).thenReturn(block);
+        when(block.getType()).thenReturn(Material.ENDER_CHEST);
+        when(block.getState()).thenReturn(enderChestState);
+        when(player.getEnderChest()).thenReturn(privateEnderChestInventory);
+
+        Inventory resolvedInventory = transaction.getInventoryIfValid(identity, world, player);
+
+        assertSame(privateEnderChestInventory, resolvedInventory);
+    }
+    /**
+     * 潜影盒 Material 白名单必须接受未染色与染色变体。
+     */
+    @Test
+    void expectedSingleMaterial_shulkerVariantsAreAccepted() {
+        assertTrue(ContainerTransaction.isExpectedSingleMaterial(Material.SHULKER_BOX,
+                io.github.autochest.container.ContainerIdentity.ContainerType.SHULKER_BOX));
+        assertTrue(ContainerTransaction.isExpectedSingleMaterial(Material.RED_SHULKER_BOX,
+                io.github.autochest.container.ContainerIdentity.ContainerType.SHULKER_BOX));
+        assertFalse(ContainerTransaction.isExpectedSingleMaterial(Material.CHEST,
+                io.github.autochest.container.ContainerIdentity.ContainerType.SHULKER_BOX));
+    }
+
+    /**
+     * 末影箱必须精确匹配末影箱 Material，避免方块替换后仍访问玩家私有库存。
+     */
+    @Test
+    void expectedSingleMaterial_enderChestRequiresExactMaterial() {
+        assertTrue(ContainerTransaction.isExpectedSingleMaterial(Material.ENDER_CHEST,
+                io.github.autochest.container.ContainerIdentity.ContainerType.ENDER_CHEST));
+        assertFalse(ContainerTransaction.isExpectedSingleMaterial(Material.CHEST,
+                io.github.autochest.container.ContainerIdentity.ContainerType.ENDER_CHEST));
+    }
     /**
      * 守恒校验数学验证：存入 32 个后两端合计应不变
      */
