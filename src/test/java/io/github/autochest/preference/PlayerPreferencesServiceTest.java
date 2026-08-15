@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Logger;
 
@@ -40,6 +41,10 @@ class PlayerPreferencesServiceTest {
         // 仅向 restock 黑名单加入末影箱。
         assertTrue(savingService.setBlacklisted(playerUuid, OperationType.RESTOCK,
                 ContainerIdentity.ContainerType.ENDER_CHEST, true));
+        // 锁定 deposit 主背包中的一个有物品或空槽均可用的槽位。
+        assertTrue(savingService.setLockedInventorySlot(playerUuid, 9, true));
+        // 锁定另一个主背包槽位。
+        assertTrue(savingService.setLockedInventorySlot(playerUuid, 35, true));
         // 等待所有 JSON 写入任务完成。
         savingService.flushAndClose(5L);
 
@@ -58,6 +63,10 @@ class PlayerPreferencesServiceTest {
         assertTrue(restockSnapshot.allows(ContainerIdentity.ContainerType.BARREL));
         // 验证 restock 的独立黑名单被准确恢复。
         assertFalse(restockSnapshot.allows(ContainerIdentity.ContainerType.ENDER_CHEST));
+        // 验证 deposit 锁定槽位跨保存与重载准确恢复。
+        assertEquals(Set.of(9, 35), depositSnapshot.getLockedInventorySlots());
+        // 验证 restock 不继承仅供 deposit 使用的锁定槽位。
+        assertTrue(restockSnapshot.getLockedInventorySlots().isEmpty());
         // 关闭第二个服务，释放后台线程。
         loadingService.flushAndClose(5L);
     }

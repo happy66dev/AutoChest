@@ -31,6 +31,15 @@ public final class OperationPreferencesSnapshot {
     /** 本操作的完整容器种类优先级列表。 */
     private final List<ContainerIdentity.ContainerType> containerTypePriority;
 
+    /** 可被锁定的主背包首个 Bukkit 槽位。 */
+    public static final int FIRST_LOCKABLE_INVENTORY_SLOT = 9;
+
+    /** 可被锁定的主背包最后一个 Bukkit 槽位。 */
+    public static final int LAST_LOCKABLE_INVENTORY_SLOT = 35;
+
+    /** 本操作中不允许作为 deposit 来源的主背包槽位。 */
+    private final Set<Integer> lockedInventorySlots;
+
     /**
      * 创建并规范化操作偏好快照。
      *
@@ -41,6 +50,22 @@ public final class OperationPreferencesSnapshot {
     public OperationPreferencesSnapshot(ContainerOrderMode orderMode,
                                         Set<ContainerIdentity.ContainerType> blacklistedContainerTypes,
                                         List<ContainerIdentity.ContainerType> containerTypePriority) {
+        // 兼容既有调用方：未提供锁定槽位时使用空集合。
+        this(orderMode, blacklistedContainerTypes, containerTypePriority, Set.of());
+    }
+
+    /**
+     * 创建并规范化包含锁定主背包槽位的操作偏好快照。
+     *
+     * @param orderMode 容器排序模式，可为空。
+     * @param blacklistedContainerTypes 黑名单种类，可为空。
+     * @param containerTypePriority 玩家配置优先级，可为空。
+     * @param lockedInventorySlots 被锁定的主背包槽位，可为空。
+     */
+    public OperationPreferencesSnapshot(ContainerOrderMode orderMode,
+                                        Set<ContainerIdentity.ContainerType> blacklistedContainerTypes,
+                                        List<ContainerIdentity.ContainerType> containerTypePriority,
+                                        Set<Integer> lockedInventorySlots) {
         // 空模式使用距离优先，兼容缺失或损坏的 JSON 字段。
         this.orderMode = orderMode == null ? ContainerOrderMode.DISTANCE : orderMode;
         // 创建独立枚举集合，防止调用方后续修改黑名单影响任务快照。
@@ -53,6 +78,18 @@ public final class OperationPreferencesSnapshot {
         this.blacklistedContainerTypes = Set.copyOf(normalizedBlacklist);
         // 规范优先级，去重并补齐所有当前支持的容器种类。
         this.containerTypePriority = List.copyOf(normalizePriority(containerTypePriority));
+        // 创建结果集合，仅保留主背包范围内的有效锁定槽位。
+        java.util.Set<Integer> normalizedLockedSlots = new java.util.TreeSet<>();
+        // 喵~防御：空集合或包含 null 的外部输入不会中断配置加载。
+        if (lockedInventorySlots != null) {
+            for (Integer inventorySlot : lockedInventorySlots) {
+                if (inventorySlot != null && isLockableInventorySlot(inventorySlot)) {
+                    normalizedLockedSlots.add(inventorySlot);
+                }
+            }
+        }
+        // 冻结锁定集合，避免 GUI 修改影响已创建任务。
+        this.lockedInventorySlots = Set.copyOf(normalizedLockedSlots);
     }
 
     /**
@@ -93,6 +130,39 @@ public final class OperationPreferencesSnapshot {
         }
         // 返回完整的稳定优先级列表。
         return normalizedPriority;
+    }
+
+    /**
+     * 判断 Bukkit 玩家背包槽位是否允许被锁定。
+     *
+     * @param inventorySlot 待检查的玩家背包槽位。
+     * @return true 表示槽位属于主背包可整理范围。
+     */
+    public static boolean isLockableInventorySlot(int inventorySlot) {
+        // 仅允许 Deposit 当前实际遍历的主背包槽位范围。
+        return inventorySlot >= FIRST_LOCKABLE_INVENTORY_SLOT
+                && inventorySlot <= LAST_LOCKABLE_INVENTORY_SLOT;
+    }
+
+    /**
+     * 判断指定主背包槽位是否已被锁定。
+     *
+     * @param inventorySlot 待检查的玩家背包槽位。
+     * @return true 表示 deposit 必须跳过该槽位。
+     */
+    public boolean isLockedInventorySlot(int inventorySlot) {
+        // 非法范围的槽位永远不属于锁定集合。
+        return isLockableInventorySlot(inventorySlot) && lockedInventorySlots.contains(inventorySlot);
+    }
+
+    /**
+     * 获取冻结的主背包锁定槽位集合。
+     *
+     * @return 仅含 9..35 的不可变槽位集合。
+     */
+    public Set<Integer> getLockedInventorySlots() {
+        // 返回已经防御性冻结的集合。
+        return lockedInventorySlots;
     }
 
     /**

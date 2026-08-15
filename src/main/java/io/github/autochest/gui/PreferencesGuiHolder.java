@@ -17,7 +17,9 @@ public final class PreferencesGuiHolder implements InventoryHolder {
         /** 存入与补货选择主菜单。 */
         MAIN,
         /** deposit 或 restock 的独立配置页面。 */
-        OPERATION
+        OPERATION,
+        /** 仅供 deposit 使用的主背包锁定格配置页面。 */
+        LOCKED_INVENTORY_SLOTS
     }
 
     /** 当前页面所属的玩家 UUID。 */

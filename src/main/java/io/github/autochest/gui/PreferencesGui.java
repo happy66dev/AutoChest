@@ -30,6 +30,9 @@ public final class PreferencesGui {
     /** 主菜单中 restock 入口的槽位。 */
     private static final int MAIN_RESTOCK_SLOT = 15;
 
+    /** 主菜单中锁定主背包格入口的槽位。 */
+    private static final int MAIN_LOCKED_SLOTS_SLOT = 13;
+
     /** 主菜单中关闭按钮的槽位。 */
     private static final int MAIN_CLOSE_SLOT = 22;
 
@@ -56,6 +59,18 @@ public final class PreferencesGui {
 
     /** 展示下移优先级按钮的槽位。 */
     private static final int[] MOVE_DOWN_SLOTS = {38, 41, 44, 47, 50};
+
+    /** 锁定格页面中返回主菜单按钮的槽位。 */
+    private static final int LOCKED_SLOTS_BACK_SLOT = 0;
+
+    /** 锁定格页面中关闭按钮的槽位。 */
+    private static final int LOCKED_SLOTS_CLOSE_SLOT = 8;
+
+    /** 锁定格页面中主背包预览网格的起始槽位。 */
+    private static final int LOCKED_SLOTS_GRID_START = 18;
+
+    /** 锁定格页面中主背包预览槽位数量。 */
+    private static final int LOCKED_SLOTS_GRID_SIZE = 27;
 
     /** 固定显示与配置的五种容器类型。 */
     private static final List<ContainerIdentity.ContainerType> DISPLAY_TYPES = List.of(
@@ -115,6 +130,9 @@ public final class PreferencesGui {
         // 放入 restock 设置入口。
         inventory.setItem(MAIN_RESTOCK_SLOT, createItem(Material.ENDER_CHEST, "§b📤 补货设置",
                 List.of("§7配置 restock 的容器黑名单", "§7排序模式与种类优先级", "§e点击打开")));
+        // 放入仅影响 deposit 的主背包锁定格入口。
+        inventory.setItem(MAIN_LOCKED_SLOTS_SLOT, createItem(Material.TRIPWIRE_HOOK, "§e🔒 锁定格",
+                List.of("§7锁定主背包格，整理时跳过", "§7仅影响 deposit", "§e点击打开")));
         // 放入关闭按钮。
         inventory.setItem(MAIN_CLOSE_SLOT, createItem(Material.BARRIER, "§c关闭菜单",
                 List.of("§7不修改任何配置")));
@@ -152,6 +170,34 @@ public final class PreferencesGui {
     }
 
     /**
+     * 打开仅影响 deposit 的主背包锁定格配置页面。
+     *
+     * @param player 要打开页面的玩家。
+     */
+    public void openLockedInventorySlots(Player player) {
+        // 喵~防御：离线或空玩家不能打开库存 GUI。
+        if (player == null || !player.isOnline()) {
+            return;
+        }
+        // 获取 deposit 的最新锁定槽位快照。
+        OperationPreferencesSnapshot snapshot = preferencesService.snapshot(
+                player.getUniqueId(), OperationType.DEPOSIT);
+        // 创建新会话使之前任意页面失效。
+        UUID sessionToken = sessionRegistry.begin(player.getUniqueId());
+        // 创建专属 Holder，锁定页不需要操作类型上下文。
+        PreferencesGuiHolder holder = new PreferencesGuiHolder(player.getUniqueId(), sessionToken,
+                PreferencesGuiHolder.PageType.LOCKED_INVENTORY_SLOTS, null);
+        // 创建六行库存，为控制栏和完整 27 格预览留出独立空间。
+        Inventory inventory = Bukkit.createInventory(holder, 54, "§8AutoChest 锁定格");
+        // 将库存实例绑定给 Holder。
+        holder.bindInventory(inventory);
+        // 绘制锁定格控制栏与玩家主背包预览。
+        renderLockedInventorySlots(inventory, player, snapshot);
+        // 打开完成后的锁定格页面。
+        player.openInventory(inventory);
+    }
+
+    /**
      * 处理通过安全校验后的 GUI 顶部槽位点击。
      *
      * @param player 点击玩家。
@@ -167,6 +213,11 @@ public final class PreferencesGui {
         // 主菜单根据入口槽位切换到对应操作页面。
         if (holder.getPageType() == PreferencesGuiHolder.PageType.MAIN) {
             handleMainClick(player, rawSlot);
+            return;
+        }
+        // 锁定格页面处理主背包预览与控制按钮。
+        if (holder.getPageType() == PreferencesGuiHolder.PageType.LOCKED_INVENTORY_SLOTS) {
+            handleLockedInventorySlotsClick(player, rawSlot);
             return;
         }
         // 操作页面按操作类型处理配置修改。
@@ -185,10 +236,56 @@ public final class PreferencesGui {
             openOperation(player, OperationType.RESTOCK);
             return;
         }
+        // 锁定格入口打开 deposit 专属主背包锁定页。
+        if (rawSlot == MAIN_LOCKED_SLOTS_SLOT) {
+            openLockedInventorySlots(player);
+            return;
+        }
         // 关闭按钮关闭库存。
         if (rawSlot == MAIN_CLOSE_SLOT) {
             player.closeInventory();
         }
+    }
+
+    /** 处理锁定格页面按钮与主背包预览格。 */
+    private void handleLockedInventorySlotsClick(Player player, int rawSlot) {
+        // 返回按钮打开新主菜单会话。
+        if (rawSlot == LOCKED_SLOTS_BACK_SLOT) {
+            openMain(player);
+            return;
+        }
+        // 关闭按钮关闭当前库存。
+        if (rawSlot == LOCKED_SLOTS_CLOSE_SLOT) {
+            player.closeInventory();
+            return;
+        }
+        // 将有效预览 raw slot 映射为主背包 Bukkit 槽位。
+        int inventorySlot = lockedInventorySlotAt(rawSlot);
+        // 喵~防御：控制栏与网格外点击不能改变锁定配置。
+        if (inventorySlot < 0) {
+            return;
+        }
+        // 读取最新 deposit 快照，计算本次点击后的目标状态。
+        OperationPreferencesSnapshot snapshot = preferencesService.snapshot(
+                player.getUniqueId(), OperationType.DEPOSIT);
+        // 写入相反锁定状态；无论是否变化都重绘以保持显示同步。
+        preferencesService.setLockedInventorySlot(player.getUniqueId(), inventorySlot,
+                !snapshot.isLockedInventorySlot(inventorySlot));
+        // 新页面生成 token，确保旧点击无法继续修改配置。
+        openLockedInventorySlots(player);
+    }
+
+    /** 将锁定页预览 raw slot 转换为玩家主背包 Bukkit 槽位。 */
+    private int lockedInventorySlotAt(int rawSlot) {
+        // 计算预览网格末尾的排他槽位。
+        int gridEndExclusive = LOCKED_SLOTS_GRID_START + LOCKED_SLOTS_GRID_SIZE;
+        // 喵~防御：仅连续 27 格预览区域能对应玩家主背包。
+        if (rawSlot < LOCKED_SLOTS_GRID_START || rawSlot >= gridEndExclusive) {
+            return -1;
+        }
+        // 将 GUI 相对索引映射到 Deposit 使用的 Bukkit 主背包槽位。
+        return OperationPreferencesSnapshot.FIRST_LOCKABLE_INVENTORY_SLOT
+                + rawSlot - LOCKED_SLOTS_GRID_START;
     }
 
     /** 处理操作页面按钮。 */
@@ -268,6 +365,77 @@ public final class PreferencesGui {
         }
         // 返回当前位置种类。
         return priority.get(index);
+    }
+
+    /**
+     * 渲染锁定格控制栏和玩家主背包预览。
+     *
+     * @param inventory 锁定格 GUI 库存。
+     * @param player 当前玩家。
+     * @param snapshot 最新 deposit 偏好快照。
+     */
+    private void renderLockedInventorySlots(Inventory inventory, Player player,
+                                            OperationPreferencesSnapshot snapshot) {
+        // 放置返回主菜单按钮。
+        inventory.setItem(LOCKED_SLOTS_BACK_SLOT, createItem(Material.ARROW, "§e← 返回主菜单",
+                List.of("§7返回全部配置入口")));
+        // 放置关闭按钮。
+        inventory.setItem(LOCKED_SLOTS_CLOSE_SLOT, createItem(Material.BARRIER, "§c关闭菜单",
+                List.of("§7配置已自动进入保存队列")));
+        // 为每个 Deposit 主背包槽位创建独立的展示副本。
+        for (int offset = 0; offset < LOCKED_SLOTS_GRID_SIZE; offset++) {
+            // 将网格相对位置转换为真实玩家背包槽位。
+            int inventorySlot = OperationPreferencesSnapshot.FIRST_LOCKABLE_INVENTORY_SLOT + offset;
+            // 将网格相对位置转换为顶部库存原始槽位。
+            int displaySlot = LOCKED_SLOTS_GRID_START + offset;
+            // 读取玩家当前槽位并克隆，禁止 GUI 与实际背包共享 ItemStack 引用。
+            ItemStack playerItem = player.getInventory().getItem(inventorySlot);
+            // 根据槽位锁定状态选择渲染标识。
+            boolean locked = snapshot.isLockedInventorySlot(inventorySlot);
+            // 将状态化展示物品放入独立 GUI 槽位。
+            inventory.setItem(displaySlot, createLockedInventorySlotItem(playerItem, inventorySlot, locked));
+        }
+    }
+
+    /**
+     * 创建主背包锁定格的状态化展示物品。
+     *
+     * @param playerItem 当前玩家背包物品，可为空。
+     * @param inventorySlot 对应 Bukkit 玩家背包槽位。
+     * @param locked 当前是否锁定。
+     * @return 仅用于 GUI 展示的独立物品副本。
+     */
+    private ItemStack createLockedInventorySlotItem(ItemStack playerItem, int inventorySlot, boolean locked) {
+        // 空槽使用可点击的玻璃板占位，确保空槽也能锁定。
+        ItemStack displayItem = playerItem == null || playerItem.getType().isAir()
+                ? new ItemStack(locked ? Material.RED_STAINED_GLASS_PANE : Material.LIME_STAINED_GLASS_PANE)
+                : playerItem.clone();
+        // 获取展示副本元数据。
+        ItemMeta meta = displayItem.getItemMeta();
+        // 喵~防御：无元数据材料仍可展示物品，但不尝试写入状态文本。
+        if (meta == null) {
+            return displayItem;
+        }
+        // 空槽使用状态名称，非空槽保留物品名称并在 lore 标记状态。
+        if (playerItem == null || playerItem.getType().isAir()) {
+            meta.setDisplayName(locked ? "§c已锁定空槽" : "§a可整理空槽");
+        }
+        // 创建不复用原物品 lore 的状态说明。
+        List<String> lore = new ArrayList<>();
+        // 说明真实 Bukkit 槽位，便于玩家确认映射关系。
+        lore.add("§7主背包槽位: " + inventorySlot);
+        // 明确显示当前 deposit 行为。
+        lore.add(locked ? "§c状态: 已锁定，整理时跳过" : "§a状态: 可整理");
+        // 提示玩家点击可切换状态。
+        lore.add("§e点击切换锁定状态");
+        // 设置状态说明，避免将玩家物品原 lore 当作配置来源。
+        meta.setLore(lore);
+        // 隐藏默认属性，保持 GUI 展示整洁。
+        meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
+        // 应用修改后的展示元数据。
+        displayItem.setItemMeta(meta);
+        // 返回只属于 GUI 的物品副本。
+        return displayItem;
     }
 
     /** 渲染单操作配置页面。 */

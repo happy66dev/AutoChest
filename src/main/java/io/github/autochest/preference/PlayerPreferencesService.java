@@ -216,6 +216,36 @@ public final class PlayerPreferencesService {
     }
 
     /**
+     * 设置 deposit 主背包槽位的锁定状态并排队持久化。
+     *
+     * @param playerUuid 玩家 UUID。
+     * @param inventorySlot 玩家主背包 Bukkit 槽位。
+     * @param locked true 表示锁定，false 表示解除锁定。
+     * @return true 表示锁定状态发生实际变化。
+     */
+    public boolean setLockedInventorySlot(UUID playerUuid, int inventorySlot, boolean locked) {
+        // 喵~防御：关闭、空 UUID 或非主背包槽位时不修改内存和磁盘。
+        if (closing || playerUuid == null
+                || !OperationPreferencesSnapshot.isLockableInventorySlot(inventorySlot)) {
+            return false;
+        }
+        // 获取当前玩家偏好模型。
+        PlayerPreferences preferences = loadedPreferences.computeIfAbsent(playerUuid, this::loadPreferences);
+        // 锁定格仅属于 deposit，不影响 restock profile。
+        MutableProfile depositProfile = preferences.profile(OperationType.DEPOSIT);
+        // 按请求加入或移除锁定槽位。
+        boolean changed = locked
+                ? depositProfile.lockedInventorySlots.add(inventorySlot)
+                : depositProfile.lockedInventorySlots.remove(inventorySlot);
+        // 仅在状态实际变化时提交完整偏好快照。
+        if (changed) {
+            queueSave(playerUuid, preferences.copy());
+        }
+        // 返回本次状态是否变化。
+        return changed;
+    }
+
+    /**
      * 读取并容错解析单个玩家 JSON 文件。
      *
      * @param playerUuid 玩家 UUID。
@@ -254,9 +284,10 @@ public final class PlayerPreferencesService {
      * @return 规范化后的玩家偏好。
      */
     private PlayerPreferences parsePreferences(JsonObject root) {
-        // 分别解析 deposit 与 restock，缺失字段独立回退默认。
-        MutableProfile deposit = parseProfile(root.getAsJsonObject("deposit"));
-        MutableProfile restock = parseProfile(root.getAsJsonObject("restock"));
+        // deposit 解析包含锁定槽位，restock 始终忽略该字段。
+        MutableProfile deposit = parseProfile(root.getAsJsonObject("deposit"), true);
+        // restock 保持原有容器偏好，不应用锁定槽位。
+        MutableProfile restock = parseProfile(root.getAsJsonObject("restock"), false);
         // 返回两套完全独立的可变 profile。
         return new PlayerPreferences(deposit, restock);
     }
@@ -265,9 +296,10 @@ public final class PlayerPreferencesService {
      * 从 JSON 解析单个操作 profile。
      *
      * @param object 当前操作 JSON 对象，可为空。
+     * @param supportsLockedInventorySlots true 表示解析 deposit 锁定槽位。
      * @return 已归一化的操作 profile。
      */
-    private MutableProfile parseProfile(JsonObject object) {
+    private MutableProfile parseProfile(JsonObject object, boolean supportsLockedInventorySlots) {
         // 缺失 profile 时返回默认 profile。
         if (object == null) {
             return MutableProfile.defaults();
@@ -278,9 +310,47 @@ public final class PlayerPreferencesService {
         Set<ContainerIdentity.ContainerType> blacklist = parseTypeSet(object.get("blacklistedContainerTypes"));
         // 解析容器优先级数组。
         List<ContainerIdentity.ContainerType> priority = parseTypeList(object.get("containerTypePriority"));
+        // 仅 deposit 接受锁定主背包槽位配置。
+        Set<Integer> lockedInventorySlots = supportsLockedInventorySlots
+                ? parseLockedInventorySlots(object.get("lockedInventorySlots")) : Set.of();
         // 通过不可变快照统一归一化后再转换回可变 profile。
-        OperationPreferencesSnapshot normalized = new OperationPreferencesSnapshot(orderMode, blacklist, priority);
+        OperationPreferencesSnapshot normalized = new OperationPreferencesSnapshot(
+                orderMode, blacklist, priority, lockedInventorySlots);
         return new MutableProfile(normalized);
+    }
+
+    /**
+     * 解析 deposit 锁定主背包槽位数组。
+     *
+     * @param element JSON 槽位数组。
+     * @return 仅含合法主背包槽位的集合。
+     */
+    private Set<Integer> parseLockedInventorySlots(JsonElement element) {
+        // 使用集合自动消除重复槽位。
+        Set<Integer> lockedInventorySlots = new java.util.HashSet<>();
+        // 喵~防御：非数组或缺失字段兼容旧 JSON，按空集合处理。
+        if (element == null || !element.isJsonArray()) {
+            return lockedInventorySlots;
+        }
+        // 逐项读取手工编辑或旧版本 JSON 的槽位值。
+        for (JsonElement slotElement : element.getAsJsonArray()) {
+            // 喵~防御：仅接受数值原始类型，跳过字符串、布尔值和 null。
+            if (slotElement == null || !slotElement.isJsonPrimitive()
+                    || !slotElement.getAsJsonPrimitive().isNumber()) {
+                continue;
+            }
+            try {
+                // 读取整数槽位；非整数或溢出数值会进入安全忽略分支。
+                int inventorySlot = slotElement.getAsInt();
+                if (OperationPreferencesSnapshot.isLockableInventorySlot(inventorySlot)) {
+                    lockedInventorySlots.add(inventorySlot);
+                }
+            } catch (NumberFormatException exception) {
+                // 喵~防御：异常数值不阻断整份玩家偏好加载。
+            }
+        }
+        // 返回待快照再次规范化的合法集合。
+        return lockedInventorySlots;
     }
 
     /**
@@ -378,10 +448,10 @@ public final class PlayerPreferencesService {
         JsonObject root = new JsonObject();
         // 写入格式版本以支持未来迁移。
         root.addProperty("version", SCHEMA_VERSION);
-        // 写入 deposit 独立 profile。
-        root.add("deposit", serializeProfile(preferences.deposit));
-        // 写入 restock 独立 profile。
-        root.add("restock", serializeProfile(preferences.restock));
+        // 写入 deposit 独立 profile 与锁定槽位。
+        root.add("deposit", serializeProfile(preferences.deposit, true));
+        // 写入 restock 独立 profile，保持锁定槽位不生效。
+        root.add("restock", serializeProfile(preferences.restock, false));
         // 输出可读且稳定的 JSON 文本。
         return gson.toJson(root);
     }
@@ -390,9 +460,10 @@ public final class PlayerPreferencesService {
      * 将单个操作 profile 序列化为 JSON 对象。
      *
      * @param profile 待写入 profile。
+     * @param includeLockedInventorySlots true 表示写入 deposit 锁定槽位。
      * @return JSON profile 对象。
      */
-    private JsonObject serializeProfile(MutableProfile profile) {
+    private JsonObject serializeProfile(MutableProfile profile, boolean includeLockedInventorySlots) {
         // 先转换为不可变快照以确保输出已归一化。
         OperationPreferencesSnapshot snapshot = profile.snapshot();
         // 创建 JSON profile 对象。
@@ -415,6 +486,14 @@ public final class PlayerPreferencesService {
         }
         // 挂载优先级数组。
         object.add("containerTypePriority", priority);
+        // deposit profile 额外写入排序后的锁定槽位，保证 JSON 稳定。
+        if (includeLockedInventorySlots) {
+            JsonArray lockedSlots = new JsonArray();
+            for (Integer inventorySlot : snapshot.getLockedInventorySlots().stream().sorted().toList()) {
+                lockedSlots.add(inventorySlot);
+            }
+            object.add("lockedInventorySlots", lockedSlots);
+        }
         // 返回 JSON profile。
         return object;
     }
@@ -503,6 +582,8 @@ public final class PlayerPreferencesService {
         private EnumSet<ContainerIdentity.ContainerType> blacklistedContainerTypes;
         /** 当前容器种类优先级列表。 */
         private List<ContainerIdentity.ContainerType> containerTypePriority;
+        /** deposit 中被锁定的主背包槽位。 */
+        private Set<Integer> lockedInventorySlots;
 
         /** 创建默认 profile。 */
         private static MutableProfile defaults() {
@@ -520,12 +601,15 @@ public final class PlayerPreferencesService {
                     : EnumSet.copyOf(snapshot.getBlacklistedContainerTypes());
             // 复制优先级列表。
             this.containerTypePriority = new ArrayList<>(snapshot.getContainerTypePriority());
+            // 复制锁定槽位集合，只有 deposit profile 会实际使用它。
+            this.lockedInventorySlots = new java.util.HashSet<>(snapshot.getLockedInventorySlots());
         }
 
         /** 生成已归一化不可变快照。 */
         private OperationPreferencesSnapshot snapshot() {
             // 创建防御性不可变快照。
-            return new OperationPreferencesSnapshot(orderMode, blacklistedContainerTypes, containerTypePriority);
+            return new OperationPreferencesSnapshot(orderMode, blacklistedContainerTypes,
+                    containerTypePriority, lockedInventorySlots);
         }
     }
 
