@@ -5,6 +5,7 @@ import io.github.autochest.task.OperationType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Set;
 import java.util.UUID;
@@ -67,7 +68,41 @@ class PlayerPreferencesServiceTest {
         assertEquals(Set.of(9, 35), depositSnapshot.getLockedInventorySlots());
         // 验证 restock 不继承仅供 deposit 使用的锁定槽位。
         assertTrue(restockSnapshot.getLockedInventorySlots().isEmpty());
-        // 关闭第二个服务，释放后台线程。
+        loadingService.flushAndClose(5L);
+    }
+
+    /**
+     * 手工 JSON 中的小数、溢出值和非 deposit 锁定字段不得误锁定主背包槽位。
+     *
+     * @param temporaryDirectory JUnit 提供的独立临时目录。
+     * @throws Exception 玩家 JSON 写入失败时由测试框架报告。
+     */
+    @Test
+    void preferences_jsonIgnoresInvalidLockedInventorySlots(@TempDir Path temporaryDirectory) throws Exception {
+        // 创建稳定玩家 UUID。
+        UUID playerUuid = UUID.randomUUID();
+        // 构建该玩家的既有 JSON 文件路径。
+        Path playerFile = temporaryDirectory.resolve("data").resolve("players").resolve(playerUuid + ".json");
+        // 创建目标目录以模拟服务器此前已写入的玩家配置。
+        Files.createDirectories(playerFile.getParent());
+        // 写入包含小数、溢出值、字符串、布尔值和合法槽位的手工 JSON。
+        Files.writeString(playerFile, """
+                {"version":1,"deposit":{"lockedInventorySlots":[9.5,9,35,36,2147483648,"10",true]},
+                "restock":{"lockedInventorySlots":[10]}}
+                """);
+        // 创建新服务以触发 JSON 容错加载。
+        PlayerPreferencesService loadingService = new PlayerPreferencesService(
+                temporaryDirectory.resolve("data"), Logger.getLogger("PlayerPreferencesServiceTest"));
+        // 读取 deposit 快照，验证仅精确合法整数槽位被保留。
+        OperationPreferencesSnapshot depositSnapshot = loadingService.snapshot(playerUuid, OperationType.DEPOSIT);
+        // 读取 restock 快照，验证其始终忽略锁定字段。
+        OperationPreferencesSnapshot restockSnapshot = loadingService.snapshot(playerUuid, OperationType.RESTOCK);
+
+        // 验证小数 9.5 没有被截断为槽位 9，而整数 9 和 35 被保留。
+        assertEquals(Set.of(9, 35), depositSnapshot.getLockedInventorySlots());
+        // 验证 restock 不接受锁定格配置。
+        assertTrue(restockSnapshot.getLockedInventorySlots().isEmpty());
+        // 关闭服务并释放后台线程。
         loadingService.flushAndClose(5L);
     }
 }
