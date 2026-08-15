@@ -134,7 +134,8 @@ public class AutoChestPlugin extends JavaPlugin {
                 new DepositService(containerTransaction, taskRegistry, this, getLogger(),
                         crossStorageMutationCoordinator, playerBackpackTaskContexts);
         RestockService restockService =
-                new RestockService(containerTransaction, taskRegistry, this, getLogger());
+                new RestockService(containerTransaction, taskRegistry, this, getLogger(),
+                        crossStorageMutationCoordinator, playerBackpackTaskContexts);
 
         // 步骤 9：注册命令
         AutoChestCommand commandHandler = new AutoChestCommand(

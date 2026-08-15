@@ -132,14 +132,9 @@ public class DepositService {
             }
         }
 
-        if (playerItems.isEmpty()) {
-            // 主背包为空，无需操作
-            if (phase == Phase.FILL_EXISTING) {
-                // 继续第二阶段也无意义
-                onDone.onComplete(stats);
-            } else {
-                onDone.onComplete(stats);
-            }
+        if (playerItems.isEmpty() && playerBackpackTaskContext(playerTask) == null) {
+            // 原版和 PlayerBackpack 来源均为空，无需操作喵~
+            onDone.onComplete(stats);
             return;
         }
 
@@ -233,6 +228,17 @@ public class DepositService {
 
         // 本阶段所有容器处理完毕
         onPhoneDone.run();
+    }
+
+    // 获取当前任务的 PlayerBackpack 上下文，供空原版背包判断使用喵~
+    private PlayerBackpackTaskContext playerBackpackTaskContext(PlayerTask playerTask) {
+        // 无跨域表时安全返回空喵~
+        if (playerBackpackTaskContexts == null || playerTask == null) {
+            // 表示没有 PlayerBackpack 来源喵~
+            return null;
+        }
+        // 返回当前玩家已登记上下文喵~
+        return playerBackpackTaskContexts.get(playerTask.getPlayerUuid());
     }
 
     // 处理 PlayerBackpack 来源，保持容器阶段与逻辑槽位升序规则喵~

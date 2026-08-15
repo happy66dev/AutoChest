@@ -1,6 +1,9 @@
 package io.github.autochest.service;
 
 import io.github.autochest.container.ContainerIdentity;
+import io.github.autochest.integration.playerbackpack.CrossStorageMutationCoordinator;
+import io.github.autochest.integration.playerbackpack.PlayerBackpackTaskContext;
+import io.github.autochest.integration.playerbackpack.PlayerBackpackTaskContexts;
 import io.github.autochest.scan.CandidatePlanner.PlanResult;
 import io.github.autochest.task.PlayerTask;
 import io.github.autochest.task.PlayerTaskRegistry;
@@ -34,6 +37,10 @@ public class RestockService {
     private final PlayerTaskRegistry registry;
     private final Plugin plugin;
     private final Logger logger;
+    // 保存跨域协调器以处理 Bukkit 容器来源到 PlayerBackpack 目标喵~
+    private final CrossStorageMutationCoordinator crossStorageCoordinator;
+    // 保存任务上下文表以取得当前 PlayerBackpack 独占会话喵~
+    private final PlayerBackpackTaskContexts playerBackpackTaskContexts;
 
     /**
      * 创建补货服务
@@ -45,10 +52,26 @@ public class RestockService {
      */
     public RestockService(ContainerTransaction transaction, PlayerTaskRegistry registry,
                           Plugin plugin, Logger logger) {
+        this(transaction, registry, plugin, logger, null, null);
+    }
+
+    // 创建可选 PlayerBackpack 双域补货服务喵~
+    public RestockService(ContainerTransaction transaction, PlayerTaskRegistry registry,
+                          Plugin plugin, Logger logger,
+                          CrossStorageMutationCoordinator crossStorageCoordinator,
+                          PlayerBackpackTaskContexts playerBackpackTaskContexts) {
+        // 保存 Bukkit 容器事务依赖喵~
         this.transaction = transaction;
+        // 保存任务注册表喵~
         this.registry = registry;
+        // 保存主线程调度插件喵~
         this.plugin = plugin;
+        // 保存日志依赖喵~
         this.logger = logger;
+        // 保存可选双域协调器喵~
+        this.crossStorageCoordinator = crossStorageCoordinator;
+        // 保存可选跨域任务表喵~
+        this.playerBackpackTaskContexts = playerBackpackTaskContexts;
     }
 
     /**
@@ -64,7 +87,8 @@ public class RestockService {
                          RestockTargetWhitelist whitelist, RestockCallback onDone) {
         // 获取按槽位升序排列的合格目标槽位
         List<Integer> eligibleSlots = whitelist.eligibleSlotsSorted();
-        if (eligibleSlots.isEmpty()) {
+        if (eligibleSlots.isEmpty() && playerBackpackTargetCount(playerTask) == 0) {
+            // 原版与 PlayerBackpack 均没有合格目标时直接完成喵~
             onDone.onComplete(new RestockStats());
             return;
         }
@@ -73,6 +97,40 @@ public class RestockService {
 
         processSlotsBudgeted(eligibleSlots, 0, 0, identities, playerTask, whitelist,
                 new RestockStats(), onDone);
+    }
+
+    // 统计当前快照中容量内已有非满 PlayerBackpack 目标数量喵~
+    private int playerBackpackTargetCount(PlayerTask playerTask) {
+        // 无跨域任务表时没有 PlayerBackpack 目标喵~
+        if (playerBackpackTaskContexts == null || playerTask == null) {
+            // 返回零目标喵~
+            return 0;
+        }
+        // 读取当前玩家任务上下文喵~
+        PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(playerTask.getPlayerUuid());
+        // 上下文缺失或关闭时没有可写目标喵~
+        if (context == null || !context.isOpen()) {
+            // 返回零目标喵~
+            return 0;
+        }
+        // 初始化合格目标计数喵~
+        int targetCount = 0;
+        // 遍历快照中的非空槽位喵~
+        for (Integer logicalSlot : context.snapshot().items().navigableKeySet()) {
+            // 跳过空键、容量外 overflow 和非法槽位喵~
+            if (logicalSlot == null || logicalSlot <= 0 || logicalSlot > context.snapshot().capacity()) {
+                continue;
+            }
+            // 读取目标物品副本喵~
+            ItemStack item = ContainerTransaction.cloneOrNull(context.snapshot().itemAt(logicalSlot));
+            // 只统计已有且未满堆叠喵~
+            if (item != null && item.getAmount() < item.getMaxStackSize()) {
+                // 增加合格目标计数喵~
+                targetCount++;
+            }
+        }
+        // 返回合格目标数量喵~
+        return targetCount;
     }
 
     /**
@@ -203,6 +261,16 @@ public class RestockService {
             containerIndex = 0;
         }
 
+        // 所有原版目标槽位处理完毕后，按逻辑槽位升序处理 PlayerBackpack 容量内目标喵~
+        ContainerOutcome backpackOutcome = processPlayerBackpackTargets(
+                identities, playerTask, stats);
+        // 喵~防御：跨域不确定失败必须取消整个任务喵~
+        if (backpackOutcome == ContainerOutcome.ABORT_TASK) {
+            // 交给命令层统一释放 AutoChest 和 PlayerBackpack 会话喵~
+            onDone.onCancelled();
+            // 不报告普通完成喵~
+            return;
+        }
         // 所有槽位处理完毕
         onDone.onComplete(stats);
     }
@@ -258,6 +326,106 @@ public class RestockService {
         return ContainerOutcome.CONTINUE;
     }
 
+
+    // 处理 PlayerBackpack 容量内已有非满目标，排除空槽、满槽和 overflow 喵~
+    private ContainerOutcome processPlayerBackpackTargets(List<ContainerIdentity> identities,
+                                                          PlayerTask playerTask,
+                                                          RestockStats stats) {
+        // 无跨域依赖时保持原版补货流程喵~
+        if (crossStorageCoordinator == null || playerBackpackTaskContexts == null) {
+            // 没有 PlayerBackpack 目标可处理喵~
+            return ContainerOutcome.CONTINUE;
+        }
+        // 获取当前玩家唯一外部操作会话喵~
+        PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(playerTask.getPlayerUuid());
+        // 会话缺失时不猜测背包目标状态喵~
+        if (context == null || !context.isOpen()) {
+            // 原版目标已安全完成喵~
+            return ContainerOutcome.CONTINUE;
+        }
+        // 获取容量边界内的逻辑槽位，并按升序处理喵~
+        List<Integer> logicalSlots = new ArrayList<>();
+        for (Integer logicalSlot : context.snapshot().items().navigableKeySet()) {
+            // 喵~防御：只允许容量内正数逻辑槽位，排除 overflow 喵~
+            if (logicalSlot != null && logicalSlot > 0 && logicalSlot <= context.snapshot().capacity()) {
+                // 加入稳定升序目标列表喵~
+                logicalSlots.add(logicalSlot);
+            }
+        }
+        // 逐个 PlayerBackpack 目标槽位处理喵~
+        for (int logicalSlot : logicalSlots) {
+            // 读取任务期间最新目标物品喵~
+            ItemStack targetItem = ContainerTransaction.cloneOrNull(context.snapshot().itemAt(logicalSlot));
+            // 空槽和已满堆叠不属于补货目标喵~
+            if (targetItem == null || targetItem.getAmount() >= targetItem.getMaxStackSize()) {
+                continue;
+            }
+            // 逐个容器按规划顺序寻找来源喵~
+            for (ContainerIdentity identity : identities) {
+                // 重新验证容器、玩家与 Hook 喵~
+                ContainerTransaction.ValidationResult validation = transaction.validate(playerTask, identity);
+                // Hook 运行期不可用时中止整个任务喵~
+                if (validation.failureResult == ContainerTransaction.Result.FAILED_HOOK_UNAVAILABLE) {
+                    // 返回不可恢复状态喵~
+                    return ContainerOutcome.ABORT_TASK;
+                }
+                // 失效容器跳过喵~
+                if (!validation.isValid()) {
+                    continue;
+                }
+                // 遍历容器来源槽位升序处理喵~
+                Inventory inventory = validation.inventory;
+                for (int containerSlot = 0; containerSlot < inventory.getSize(); containerSlot++) {
+                    // 读取容器实时来源物品喵~
+                    ItemStack sourceItem = ContainerTransaction.cloneOrNull(inventory.getItem(containerSlot));
+                    // 仅处理与任务目标相似的来源喵~
+                    if (sourceItem == null || !sourceItem.isSimilar(targetItem)) {
+                        continue;
+                    }
+                    // 计算目标还需要与来源可提供的数量喵~
+                    int needed = targetItem.getMaxStackSize() - targetItem.getAmount();
+                    // 取两端可移动数量的较小值喵~
+                    int amount = Math.min(needed, sourceItem.getAmount());
+                    // 喵~防御：数量无效时不创建跨域请求喵~
+                    if (amount <= 0) {
+                        continue;
+                    }
+                    // 提交 Bukkit 到 PlayerBackpack 的跨域 mutation 喵~
+                    CrossStorageMutationCoordinator.Result result = crossStorageCoordinator.restock(
+                            context, inventory, containerSlot, logicalSlot, amount);
+                    // 成功后更新统计和目标快照喵~
+                    if (result.status() == CrossStorageMutationCoordinator.Status.SUCCESS) {
+                        // 统计实际移动数量喵~
+                        stats.itemsMoved += result.movedAmount();
+                        // 获取 provider 返回的最新目标镜像喵~
+                        targetItem = ContainerTransaction.cloneOrNull(context.snapshot().itemAt(logicalSlot));
+                        // 目标已满则转到下一个逻辑槽位喵~
+                        if (targetItem == null || targetItem.getAmount() >= targetItem.getMaxStackSize()) {
+                            break;
+                        }
+                        // 继续从当前容器寻找同类来源喵~
+                        continue;
+                    }
+                    // 已恢复结果跳过当前容器喵~
+                    if (result.status() == CrossStorageMutationCoordinator.Status.RECOVERED) {
+                        stats.skipped++;
+                        break;
+                    }
+                    // 不确定状态立即取消任务喵~
+                    if (result.status() == CrossStorageMutationCoordinator.Status.FAILED_UNRECOVERABLE) {
+                        // 返回不可恢复状态喵~
+                        return ContainerOutcome.ABORT_TASK;
+                    }
+                }
+                // 当前目标已满时跳到下一个逻辑槽位喵~
+                if (targetItem == null || targetItem.getAmount() >= targetItem.getMaxStackSize()) {
+                    break;
+                }
+            }
+        }
+        // PlayerBackpack 目标处理完成喵~
+        return ContainerOutcome.CONTINUE;
+    }
 
     public static class RestockStats {
         /** 成功补充的物品总数 */
