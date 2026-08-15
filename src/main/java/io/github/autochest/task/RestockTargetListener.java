@@ -16,7 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Restock 目标槽位变化监听器
  * 监听可能改变玩家背包的事件，并直接使对应白名单槽位永久失效
- * 提交时仍以实时 isSimilar 为最终判定
+ * 监听器包含已取消事件，采用 fail-closed 策略防止其他插件修改后仍继续写入
  */
 public class RestockTargetListener implements Listener {
 
@@ -64,7 +64,7 @@ public class RestockTargetListener implements Listener {
      *
      * @param event 库存点击事件
      */
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.MONITOR)
     public void onInventoryClick(InventoryClickEvent event) {
         // 喵~防御：只有玩家库存操作才可能影响本插件的补货目标。
         if (!(event.getWhoClicked() instanceof Player player)) {
@@ -79,7 +79,7 @@ public class RestockTargetListener implements Listener {
      *
      * @param event 库存拖拽事件
      */
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.MONITOR)
     public void onInventoryDrag(InventoryDragEvent event) {
         // 喵~防御：只有玩家拖拽才可能影响本插件的补货目标。
         if (!(event.getWhoClicked() instanceof Player player)) {
@@ -93,7 +93,7 @@ public class RestockTargetListener implements Listener {
      *
      * @param event 丢弃物品事件
      */
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.MONITOR)
     public void onPlayerDrop(PlayerDropItemEvent event) {
         Player player = event.getPlayer();
         invalidateSlot(player.getUniqueId(), player.getInventory().getHeldItemSlot());
@@ -105,7 +105,7 @@ public class RestockTargetListener implements Listener {
      *
      * @param event 捡起物品事件
      */
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.MONITOR)
     public void onEntityPickup(EntityPickupItemEvent event) {
         // 喵~防御：非玩家实体没有本插件追踪的背包目标槽位。
         if (!(event.getEntity() instanceof Player player)) {
