@@ -6,6 +6,7 @@ import io.github.autochest.config.CooldownService;
 import io.github.autochest.config.MessageService;
 import io.github.autochest.hook.*;
 import io.github.autochest.integration.playerbackpack.PlayerBackpackHook;
+import io.github.autochest.integration.playerbackpack.PlayerBackpackTaskContexts;
 import io.github.autochest.gui.PreferencesGui;
 import io.github.autochest.gui.PreferencesGuiListener;
 import io.github.autochest.gui.PreferencesGuiSessionRegistry;
@@ -50,6 +51,9 @@ public class AutoChestPlugin extends JavaPlugin {
 
     /** PlayerBackpack 可选 API Hook，服务不可用时保持安全回退状态 */
     private PlayerBackpackHook playerBackpackHook;
+
+    /** PlayerBackpack 任务会话表，统一覆盖完成、取消与插件停用释放路径 */
+    private PlayerBackpackTaskContexts playerBackpackTaskContexts;
 
     private CompositeAccessPolicy accessPolicy;
 
@@ -103,6 +107,8 @@ public class AutoChestPlugin extends JavaPlugin {
         accessPolicy = new CompositeAccessPolicy(policies, getLogger());
         // 初始化 PlayerBackpack 可选 API Hook，失败时只关闭扩展能力。
         playerBackpackHook = new PlayerBackpackHook(getLogger());
+        // 创建跨域任务会话表，所有任务出口共享同一释放路径。
+        playerBackpackTaskContexts = new PlayerBackpackTaskContexts();
 
         // 步骤 7：注册事件监听器。
         RestockTargetListener restockListener = new RestockTargetListener();
@@ -111,7 +117,7 @@ public class AutoChestPlugin extends JavaPlugin {
         PreferencesGui preferencesGui = new PreferencesGui(playerPreferencesService, preferencesGuiSessionRegistry);
         preferencesGuiListener = new PreferencesGuiListener(preferencesGui, preferencesGuiSessionRegistry);
         getServer().getPluginManager().registerEvents(
-                new PlayerLifecycleListener(taskRegistry), this);
+                new PlayerLifecycleListener(taskRegistry, playerBackpackTaskContexts), this);
         getServer().getPluginManager().registerEvents(restockListener, this);
         getServer().getPluginManager().registerEvents(preferencesGuiListener, this);
 
@@ -145,7 +151,12 @@ public class AutoChestPlugin extends JavaPlugin {
             taskRegistry.disablePlugin();
         }
 
-        // 步骤 2：停止线程池，等待最多 2 秒后强制停止
+        // 步骤 2：释放所有存活的 PlayerBackpack 外部会话，避免插件停用后遗留目标锁。
+        if (playerBackpackTaskContexts != null) {
+            playerBackpackTaskContexts.releaseAll();
+        }
+
+        // 步骤 3：停止线程池，等待最多 2 秒后强制停止
         if (executor != null) {
             executor.shutdown();
             try {
@@ -168,7 +179,7 @@ public class AutoChestPlugin extends JavaPlugin {
             playerPreferencesService.flushAndClose(2L);
         }
 
-        // 步骤 5：清空冷却记录
+        // 步骤 6：清空冷却记录
         if (cooldownService != null) {
             cooldownService.clear();
         }
@@ -185,6 +196,16 @@ public class AutoChestPlugin extends JavaPlugin {
     public PlayerBackpackHook getPlayerBackpackHook() {
         // 返回只读 Hook，不直接暴露 PlayerBackpack 内部实现。
         return playerBackpackHook;
+    }
+
+    /**
+     * 获取 PlayerBackpack 任务会话表，供命令统一登记和释放外部操作。
+     *
+     * @return PlayerBackpackTaskContexts 实例
+     */
+    public PlayerBackpackTaskContexts getPlayerBackpackTaskContexts() {
+        // 返回插件生命周期内共享的任务资源表喵~
+        return playerBackpackTaskContexts;
     }
 
     /**
