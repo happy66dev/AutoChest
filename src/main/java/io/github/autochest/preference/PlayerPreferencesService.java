@@ -8,6 +8,7 @@ import com.google.gson.JsonParser;
 import io.github.autochest.container.ContainerIdentity;
 import io.github.autochest.task.OperationType;
 
+import java.math.BigDecimal;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -340,13 +341,17 @@ public final class PlayerPreferencesService {
                 continue;
             }
             try {
-                // 读取整数槽位；非整数或溢出数值会进入安全忽略分支。
-                int inventorySlot = slotElement.getAsInt();
+                // 读取 JSON 原始数字文本并要求它是精确整数喵~
+                BigDecimal numericValue = new BigDecimal(slotElement.getAsString());
+                // 喵~防御：小数、无穷大和超出 int 范围的配置一律忽略喵~
+                int inventorySlot = numericValue.intValueExact();
+                // 只接受 AutoChest 定义的可锁定主背包槽位喵~
                 if (OperationPreferencesSnapshot.isLockableInventorySlot(inventorySlot)) {
+                    // 保存合法槽位并自动去重喵~
                     lockedInventorySlots.add(inventorySlot);
                 }
-            } catch (NumberFormatException exception) {
-                // 喵~防御：异常数值不阻断整份玩家偏好加载。
+            } catch (NumberFormatException | ArithmeticException exception) {
+                // 喵~防御：异常数值不阻断整份玩家偏好加载喵~
             }
         }
         // 返回待快照再次规范化的合法集合。

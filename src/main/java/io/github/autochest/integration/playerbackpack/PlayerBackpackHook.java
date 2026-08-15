@@ -14,14 +14,14 @@ import java.util.logging.Logger;
 // 负责发现和校验可选 PlayerBackpack API，失败时安全回退原版功能喵~
 public final class PlayerBackpackHook {
 
-    // 当前 AutoChest 支持的 PlayerBackpack API 主版本喵~
-    private static final int REQUIRED_API_MAJOR = ApiVersion.CURRENT_MAJOR;
+    // 当前 AutoChest 编译契约固定支持 API 主版本一喵~
+    private static final int REQUIRED_API_MAJOR = 1;
     // 保存日志依赖以输出缺失或版本不兼容原因喵~
     private final Logger logger;
     // 保存发现到的 API 服务，未发现时保持空值喵~
-    private final PlayerBackpackApi api;
+    private PlayerBackpackApi api;
     // 保存一次性诊断文本，避免每次命令重复刷屏喵~
-    private final String unavailableReason;
+    private String unavailableReason;
 
     // 创建 PlayerBackpack Hook 并立即完成只读服务发现喵~
     public PlayerBackpackHook(Logger logger) {
@@ -58,25 +58,35 @@ public final class PlayerBackpackHook {
             // 结束无服务构造喵~
             return;
         }
-        // 读取服务公开的 API 版本喵~
-        ApiVersion discoveredVersion = discoveredApi.apiVersion();
-        // 喵~防御：版本对象为空或主版本不匹配时拒绝扩展写入喵~
-        if (discoveredVersion == null || !discoveredVersion.supportsMajor(REQUIRED_API_MAJOR) || !discoveredApi.isAvailable()) {
-            // 保存不兼容服务回退状态喵~
+        // 读取服务公开的 API 版本并隔离第三方实现异常喵~
+        try {
+            // 查询 provider 的版本信息喵~
+            ApiVersion discoveredVersion = discoveredApi.apiVersion();
+            // 喵~防御：版本对象为空或主版本不匹配时拒绝扩展写入喵~
+            if (discoveredVersion == null || !discoveredVersion.supportsMajor(REQUIRED_API_MAJOR) || !discoveredApi.isAvailable()) {
+                // 保存不兼容服务回退状态喵~
+                this.api = null;
+                // 保存可诊断的版本或可用性原因喵~
+                this.unavailableReason = "PlayerBackpack API 不可用或主版本不兼容喵~";
+                // 输出一次性警告喵~
+                logger.warning("[AutoChest] " + unavailableReason + "将仅处理原版玩家背包喵~");
+                // 结束无服务构造喵~
+                return;
+            }
+            // 保存经过版本校验的稳定 API 服务喵~
+            this.api = discoveredApi;
+            // 清空不可用原因表示扩展能力已准备喵~
+            this.unavailableReason = null;
+            // 输出扩展能力启用日志喵~
+            logger.info("[AutoChest] 已连接 PlayerBackpack API " + discoveredVersion + "喵~");
+        } catch (RuntimeException | LinkageError compatibilityException) {
+            // 喵~防御：第三方 provider ABI 或初始化异常时只关闭扩展能力喵~
             this.api = null;
-            // 保存可诊断的版本或可用性原因喵~
-            this.unavailableReason = "PlayerBackpack API 不可用或主版本不兼容喵~";
-            // 输出一次性警告喵~
-            logger.warning("[AutoChest] " + unavailableReason + "将仅处理原版玩家背包喵~");
-            // 结束无服务构造喵~
-            return;
+            // 保存异常类型而不继续调用损坏服务喵~
+            this.unavailableReason = "PlayerBackpack API provider 校验失败喵~";
+            // 记录异常并安全回退原版流程喵~
+            logger.log(java.util.logging.Level.WARNING, "[AutoChest] " + unavailableReason + "将仅处理原版玩家背包喵~", compatibilityException);
         }
-        // 保存经过版本校验的稳定 API 服务喵~
-        this.api = discoveredApi;
-        // 清空不可用原因表示扩展能力已准备喵~
-        this.unavailableReason = null;
-        // 输出扩展能力启用日志喵~
-        logger.info("[AutoChest] 已连接 PlayerBackpack API " + discoveredVersion + "喵~");
     }
 
     // 判断 PlayerBackpack 扩展是否可用喵~
