@@ -6,6 +6,12 @@ import io.github.autochest.config.MessageService;
 import io.github.autochest.container.ContainerIdentity;
 import io.github.autochest.hook.CompositeAccessPolicy;
 import io.github.autochest.gui.PreferencesGui;
+import io.github.autochest.integration.playerbackpack.PlayerBackpackAdapter;
+import io.github.autochest.integration.playerbackpack.PlayerBackpackTaskContext;
+import io.github.autochest.integration.playerbackpack.PlayerBackpackTaskContexts;
+import com.playerbackpack.api.BackpackOperationFailure;
+import com.playerbackpack.api.BackpackSnapshotView;
+import com.playerbackpack.api.PlayerBackpackOperation;
 import io.github.autochest.preference.ContainerOrderMode;
 import io.github.autochest.preference.OperationPreferencesSnapshot;
 import io.github.autochest.preference.PlayerPreferencesService;
@@ -55,6 +61,9 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
     /** 玩家容器偏好 GUI 开启器，保留文本命令作为并列入口 */
     private final PreferencesGui preferencesGui;
 
+    /** PlayerBackpack 外部会话资源表，统一覆盖命令失败和任务完成出口 */
+    private final PlayerBackpackTaskContexts playerBackpackTaskContexts;
+
     /** 活跃的扫描 BukkitTask，UUID → BukkitTask；用于插件禁用时取消 */
     private final Map<UUID, BukkitTask> activeScanTasks = new HashMap<>();
 
@@ -102,6 +111,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         this.containerTransaction = containerTransaction;
         this.playerPreferencesService = playerPreferencesService;
         this.preferencesGui = preferencesGui;
+        // 从插件取得跨域任务统一资源表，避免命令自行维护第二份锁记录喵~
+        this.playerBackpackTaskContexts = plugin.getPlayerBackpackTaskContexts();
     }
 
     @Override
@@ -186,32 +197,46 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         OperationPreferencesSnapshot preferencesSnapshot = playerPreferencesService.snapshot(
                 player.getUniqueId(), OperationType.DEPOSIT);
 
-        // 尝试创建任务（CAS 插入，保证不竞争）
-        Optional<PlayerTask> taskOpt = registry.tryAcquire(
-                player.getUniqueId(),
-                OperationType.DEPOSIT,
-                plugin.getCurrentConfig(),
-                preferencesSnapshot,
-                player.getWorld().getUID(),
-                player.getLocation().getBlockX(),
-                player.getLocation().getBlockY(),
-                player.getLocation().getBlockZ()
-        );
-
-        if (taskOpt.isEmpty()) {
-            // tryAcquire 失败（并发下极小概率），视为任务冲突
-            messages.sendTaskConflict(player);
+        // 若可用则先冻结 PlayerBackpack GUI、取得独占会话并在下一 tick 建立快照。
+        if (beginPlayerBackpackThenNextTick(player, OperationType.DEPOSIT,
+                () -> beginDepositTask(player, preferencesSnapshot))) {
+            // 已开始跨域预备流程，后续由回调创建 AutoChest 任务喵~
             return;
         }
+        // PlayerBackpack 不可用时保持现有原版存入流程喵~
+        beginDepositTask(player, preferencesSnapshot);
+    }
 
+    // 在 PlayerBackpack 预备完成后创建原版存入任务并启动扫描喵~
+    private void beginDepositTask(Player player, OperationPreferencesSnapshot preferencesSnapshot) {
+        // 喵~防御：下一 tick 回调执行时玩家可能已离线、死亡或切换状态喵~
+        if (player == null || !player.isOnline() || player.isDead()) {
+            // 释放预备阶段已经登记的 PlayerBackpack 会话喵~
+            playerBackpackTaskContexts.releasePlayer(player == null ? null : player.getUniqueId());
+            // 不创建不可执行的 AutoChest 任务喵~
+            return;
+        }
+        // 尝试创建任务（CAS 插入，保证不竞争）喵~
+        Optional<PlayerTask> taskOpt = registry.tryAcquire(
+                player.getUniqueId(), OperationType.DEPOSIT, plugin.getCurrentConfig(), preferencesSnapshot,
+                player.getWorld().getUID(), player.getLocation().getBlockX(),
+                player.getLocation().getBlockY(), player.getLocation().getBlockZ());
+        // 喵~防御：预备 tick 内出现并发任务时释放外部会话并提示冲突喵~
+        if (taskOpt.isEmpty()) {
+            // 释放不再属于任务的 PlayerBackpack 会话喵~
+            playerBackpackTaskContexts.releasePlayer(player.getUniqueId());
+            // 提示玩家已有任务喵~
+            plugin.getMessageService().sendTaskConflict(player);
+            // 结束命令流程喵~
+            return;
+        }
+        // 取得已注册的 AutoChest 任务喵~
         PlayerTask task = taskOpt.get();
-        // 命令接受即消费冷却，不因后续任何原因退还
+        // 命令真正接受后消费冷却喵~
         cooldownService.record(player.getUniqueId(), CooldownService.OperationType.DEPOSIT);
-
-        // 发送扫描开始提示
-        messages.sendScanStarted(player);
-
-        // 启动分 tick 扫描
+        // 提示扫描开始喵~
+        plugin.getMessageService().sendScanStarted(player);
+        // 启动分 tick 容器扫描喵~
         startScan(task);
     }
 
@@ -259,31 +284,109 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         OperationPreferencesSnapshot preferencesSnapshot = playerPreferencesService.snapshot(
                 player.getUniqueId(), OperationType.RESTOCK);
 
-        Optional<PlayerTask> taskOpt = registry.tryAcquire(
-                player.getUniqueId(),
-                OperationType.RESTOCK,
-                plugin.getCurrentConfig(),
-                preferencesSnapshot,
-                player.getWorld().getUID(),
-                player.getLocation().getBlockX(),
-                player.getLocation().getBlockY(),
-                player.getLocation().getBlockZ()
-        );
-
-        if (taskOpt.isEmpty()) {
-            messages.sendTaskConflict(player);
+        // 可用时先冻结 PlayerBackpack GUI，再在下一 tick 同步建立双域白名单。
+        if (beginPlayerBackpackThenNextTick(player, OperationType.RESTOCK,
+                () -> beginRestockTask(player, whitelist, preferencesSnapshot))) {
+            // 预备流程已异步接管任务创建喵~
             return;
         }
 
+        // PlayerBackpack 不可用时保持原版 restock 白名单与流程喵~
+        beginRestockTask(player, whitelist, preferencesSnapshot);
+    }
+
+    // 在预备阶段完成后创建原版补货任务喵~
+    private void beginRestockTask(Player player, RestockTargetWhitelist whitelist,
+                                  OperationPreferencesSnapshot preferencesSnapshot) {
+        // 喵~防御：玩家离线、死亡或白名单缺失时不创建任务喵~
+        if (player == null || whitelist == null || preferencesSnapshot == null
+                || !player.isOnline() || player.isDead()) {
+            // 释放预备阶段外部会话喵~
+            playerBackpackTaskContexts.releasePlayer(player == null ? null : player.getUniqueId());
+            // 结束不可执行流程喵~
+            return;
+        }
+        // 尝试创建任务（CAS 插入，保证不竞争）喵~
+        Optional<PlayerTask> taskOpt = registry.tryAcquire(
+                player.getUniqueId(), OperationType.RESTOCK, plugin.getCurrentConfig(), preferencesSnapshot,
+                player.getWorld().getUID(), player.getLocation().getBlockX(),
+                player.getLocation().getBlockY(), player.getLocation().getBlockZ());
+        // 喵~防御：并发冲突时先释放 PlayerBackpack 会话喵~
+        if (taskOpt.isEmpty()) {
+            // 释放未交给任务的外部会话喵~
+            playerBackpackTaskContexts.releasePlayer(player.getUniqueId());
+            // 提示任务冲突喵~
+            plugin.getMessageService().sendTaskConflict(player);
+            // 结束命令流程喵~
+            return;
+        }
+        // 取得已注册任务喵~
         PlayerTask task = taskOpt.get();
+        // 命令接受后消费冷却喵~
         cooldownService.record(player.getUniqueId(), CooldownService.OperationType.RESTOCK);
-
-        // 开始追踪玩家背包变化，并将事件失效写入本次任务的唯一白名单
+        // 开始追踪原版背包白名单喵~
         restockListener.startTracking(player.getUniqueId(), whitelist);
-
-        messages.sendScanStarted(player);
-
+        // 提示扫描开始喵~
+        plugin.getMessageService().sendScanStarted(player);
+        // 启动分 tick 扫描喵~
         startRestockScan(task, whitelist);
+    }
+
+    // 在主线程开始 PlayerBackpack 外部操作并于下一 tick 建立最新快照喵~
+    private boolean beginPlayerBackpackThenNextTick(Player player, OperationType operationType,
+                                                    Runnable afterFreeze) {
+        // 读取已校验的可选适配器喵~
+        PlayerBackpackAdapter adapter = plugin.getPlayerBackpackHook() == null
+                ? null : plugin.getPlayerBackpackHook().adapter();
+        // 不可用时返回 false 让调用方执行原版流程喵~
+        if (adapter == null) {
+            // 原版流程不需要外部会话喵~
+            return false;
+        }
+        // 尝试取得当前玩家目标背包独占会话喵~
+        Optional<PlayerBackpackOperation> operationOptional = adapter.tryBeginOperation(
+                player.getUniqueId(), player.getUniqueId(), operationType.name().toLowerCase(Locale.ROOT));
+        // 喵~防御：目标繁忙或 provider 异常时 fail-closed 拒绝扩展任务喵~
+        if (operationOptional.isEmpty()) {
+            // 不调用 afterFreeze，避免没有双域快照时继续写入喵~
+            return true;
+        }
+        // 取得独占操作句柄喵~
+        PlayerBackpackOperation operation = operationOptional.get();
+        // 保存并关闭所有相关 PlayerBackpack GUI 喵~
+        BackpackOperationFailure freezeFailure = adapter.saveAndCloseOpenGui(operation);
+        // 只有 NONE 表示冻结成功喵~
+        if (freezeFailure != BackpackOperationFailure.NONE) {
+            // 释放冻结失败的外部会话喵~
+            adapter.finish(operation);
+            // 拒绝扩展任务并提示原版流程不可安全启动喵~
+            return true;
+        }
+        // 下一 tick 读取关闭 GUI 后的最新 snapshot 喵~
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            // 喵~防御：下一 tick 读取失败时释放会话而不创建任务喵~
+            Optional<BackpackSnapshotView> snapshotOptional = adapter.loadSnapshot(player.getUniqueId());
+            if (snapshotOptional.isEmpty()) {
+                // 释放无法建立快照的外部操作喵~
+                adapter.finish(operation);
+                // 不执行任何 Bukkit/PlayerBackpack 写入喵~
+                return;
+            }
+            // 创建绑定目标和 revision 的任务上下文喵~
+            PlayerBackpackTaskContext context = new PlayerBackpackTaskContext(
+                    adapter, operation, snapshotOptional.get());
+            // 喵~防御：上下文登记失败时释放会话，避免并发任务双持有喵~
+            if (!playerBackpackTaskContexts.register(player.getUniqueId(), context)) {
+                // 释放未登记上下文喵~
+                context.close();
+                // 不启动任务喵~
+                return;
+            }
+            // 运行统一的后续任务创建回调喵~
+            afterFreeze.run();
+        });
+        // 已进入下一 tick 预备流程喵~
+        return true;
     }
 
     // ===== player container preferences =====
@@ -774,7 +877,15 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
      * @param task 要释放的任务
      */
     private void finishTask(PlayerTask task) {
+        // 释放 AutoChest 任务锁，token 不匹配时不会影响新任务喵~
         registry.release(task.getPlayerUuid(), task.getToken());
+        // 获取当前任务关联的 PlayerBackpack 上下文喵~
+        PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(task.getPlayerUuid());
+        // 存在跨域会话时按引用条件幂等释放喵~
+        if (context != null) {
+            // 释放 PlayerBackpack 目标锁喵~
+            playerBackpackTaskContexts.release(task.getPlayerUuid(), context);
+        }
     }
 
     /**

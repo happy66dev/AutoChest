@@ -7,6 +7,7 @@ import io.github.autochest.config.MessageService;
 import io.github.autochest.hook.*;
 import io.github.autochest.integration.playerbackpack.PlayerBackpackHook;
 import io.github.autochest.integration.playerbackpack.PlayerBackpackTaskContexts;
+import io.github.autochest.integration.playerbackpack.CrossStorageMutationCoordinator;
 import io.github.autochest.gui.PreferencesGui;
 import io.github.autochest.gui.PreferencesGuiListener;
 import io.github.autochest.gui.PreferencesGuiSessionRegistry;
@@ -109,6 +110,9 @@ public class AutoChestPlugin extends JavaPlugin {
         playerBackpackHook = new PlayerBackpackHook(getLogger());
         // 创建跨域任务会话表，所有任务出口共享同一释放路径。
         playerBackpackTaskContexts = new PlayerBackpackTaskContexts();
+        // 创建独立双域协调器，内部 fail-closed 处理 API 与 Bukkit 交错失败。
+        CrossStorageMutationCoordinator crossStorageMutationCoordinator =
+                new CrossStorageMutationCoordinator(getLogger());
 
         // 步骤 7：注册事件监听器。
         RestockTargetListener restockListener = new RestockTargetListener();
@@ -127,7 +131,8 @@ public class AutoChestPlugin extends JavaPlugin {
         ContainerTransaction containerTransaction =
                 new ContainerTransaction(taskRegistry, accessPolicy, getLogger());
         DepositService depositService =
-                new DepositService(containerTransaction, taskRegistry, this, getLogger());
+                new DepositService(containerTransaction, taskRegistry, this, getLogger(),
+                        crossStorageMutationCoordinator, playerBackpackTaskContexts);
         RestockService restockService =
                 new RestockService(containerTransaction, taskRegistry, this, getLogger());
 
