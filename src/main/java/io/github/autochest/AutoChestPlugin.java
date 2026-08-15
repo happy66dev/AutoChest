@@ -5,6 +5,7 @@ import io.github.autochest.config.AutoChestConfig;
 import io.github.autochest.config.CooldownService;
 import io.github.autochest.config.MessageService;
 import io.github.autochest.hook.*;
+import io.github.autochest.integration.playerbackpack.PlayerBackpackHook;
 import io.github.autochest.gui.PreferencesGui;
 import io.github.autochest.gui.PreferencesGuiListener;
 import io.github.autochest.gui.PreferencesGuiSessionRegistry;
@@ -47,7 +48,9 @@ public class AutoChestPlugin extends JavaPlugin {
     /** 玩家容器偏好 GUI 监听器，用于插件停用时使会话失效 */
     private PreferencesGuiListener preferencesGuiListener;
 
-    /** 复合容器访问策略（聚合 WorldGuard、Towny、ChestShop、Slimefun 四个可选 Hook） */
+    /** PlayerBackpack 可选 API Hook，服务不可用时保持安全回退状态 */
+    private PlayerBackpackHook playerBackpackHook;
+
     private CompositeAccessPolicy accessPolicy;
 
     /**
@@ -98,6 +101,8 @@ public class AutoChestPlugin extends JavaPlugin {
         // 添加 Slimefun 机器与方块数据保护策略，避免自动访问其管理的容器。
         policies.add(new SlimefunHook(getLogger()));
         accessPolicy = new CompositeAccessPolicy(policies, getLogger());
+        // 初始化 PlayerBackpack 可选 API Hook，失败时只关闭扩展能力。
+        playerBackpackHook = new PlayerBackpackHook(getLogger());
 
         // 步骤 7：注册事件监听器。
         RestockTargetListener restockListener = new RestockTargetListener();
@@ -169,6 +174,17 @@ public class AutoChestPlugin extends JavaPlugin {
         }
 
         getLogger().info("AutoChest 已关闭喵~");
+    }
+
+    /**
+     * 获取已校验的 PlayerBackpack 可选 API Hook
+     * 缺失或不兼容时 Hook 保持不可用，命令和服务必须继续原版流程
+     *
+     * @return 当前 PlayerBackpackHook 实例
+     */
+    public PlayerBackpackHook getPlayerBackpackHook() {
+        // 返回只读 Hook，不直接暴露 PlayerBackpack 内部实现。
+        return playerBackpackHook;
     }
 
     /**

@@ -55,7 +55,18 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- WorldGuard 可选依赖，仅编译期 -->
+        <!-- PlayerBackpack 稳定 API 可选依赖，仅在编译期提供且不打入 AutoChest JAR -->
+        <dependency>
+            <!-- 指定 PlayerBackpack API 组织标识 -->
+            <groupId>com.playerbackpack</groupId>
+            <!-- 指定稳定 API 构件标识 -->
+            <artifactId>playerbackpack-api</artifactId>
+            <!-- 使用当前 PlayerBackpack 开发版本 -->
+            <version>1.0.0-SNAPSHOT</version>
+            <!-- 运行时由 PlayerBackpack 插件及 Paper 类加载器提供 -->
+            <scope>provided</scope>
+        </dependency>
+
         <!-- Hook 阶段（阶段3）再确认确切版本后取消注释
         <dependency>
             <groupId>com.sk89q.worldguard</groupId>
