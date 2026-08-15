@@ -101,6 +101,17 @@ public final class PlayerBackpackHook {
         return api;
     }
 
+    // 创建隔离第三方异常的 PlayerBackpack 适配器喵~
+    public PlayerBackpackAdapter adapter() {
+        // 喵~防御：Hook 不可用时返回空值，调用方必须回退原版流程喵~
+        if (!isAvailable()) {
+            // 不猜测未校验服务的行为喵~
+            return null;
+        }
+        // 返回仅封装稳定 API 的适配器喵~
+        return new PlayerBackpackAdapter(api, logger);
+    }
+
     // 返回不可用诊断文本，服务可用时返回空字符串喵~
     public String unavailableReason() {
         // 避免返回 null 让命令消息处理更安全喵~
