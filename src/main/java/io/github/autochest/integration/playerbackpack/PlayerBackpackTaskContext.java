@@ -60,10 +60,10 @@ public final class PlayerBackpackTaskContext implements AutoCloseable {
             // 返回失败让协调器中止后续跨域写入喵~
             return false;
         }
-        // 喵~防御：新快照必须仍属于同一目标且 revision 单调递增或保持幂等版本喵~
+        // 喵~防御：新快照必须仍属于同一目标且 revision 严格递增，防止伪造或陈旧结果覆盖上下文喵~
         if (!operation.targetId().equals(nextSnapshot.playerId())
-                || nextSnapshot.revision() < snapshot.revision()) {
-            // 拒绝倒退或跨目标快照喵~
+                || nextSnapshot.revision() <= snapshot.revision()) {
+            // 拒绝非递增 revision 或跨目标快照喵~
             return false;
         }
         // 保存 provider 返回的已提交快照喵~

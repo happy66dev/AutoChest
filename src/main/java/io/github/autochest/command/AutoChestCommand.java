@@ -30,6 +30,7 @@ import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.util.*;
@@ -346,6 +347,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         // 喵~防御：目标繁忙或 provider 异常时 fail-closed 拒绝扩展任务喵~
         if (operationOptional.isEmpty()) {
             // 不调用 afterFreeze，避免没有双域快照时继续写入喵~
+            plugin.getMessageService().sendTaskConflict(player);
+            // 返回 true 表示命令已处理，但本次扩展任务被安全拒绝喵~
             return true;
         }
         // 取得独占操作句柄喵~
@@ -356,6 +359,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         if (freezeFailure != BackpackOperationFailure.NONE) {
             // 释放冻结失败的外部会话喵~
             adapter.finish(operation);
+            // 明确提示外部 GUI 无法安全冻结，避免命令静默失败喵~
+            plugin.getMessageService().sendCancelled(player);
             // 拒绝扩展任务并提示原版流程不可安全启动喵~
             return true;
         }
@@ -762,6 +767,40 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         }
     }
 
+    // 统计当前外部会话快照中容量内已有非满 PlayerBackpack 补货目标喵~
+    private int playerBackpackTargetCount(PlayerTask task) {
+        // 喵~防御：任务或外部会话表缺失时不存在 PlayerBackpack 补货目标喵~
+        if (task == null || playerBackpackTaskContexts == null) {
+            // 返回零目标保持原版补货判定喵~
+            return 0;
+        }
+        // 读取当前任务持有的唯一 PlayerBackpack 外部会话喵~
+        PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(task.getPlayerUuid());
+        // 喵~防御：会话缺失或已释放时不得读取陈旧 PlayerBackpack 快照喵~
+        if (context == null || !context.isOpen()) {
+            // 返回零目标喵~
+            return 0;
+        }
+        // 初始化可补货逻辑槽位计数喵~
+        int targetCount = 0;
+        // 遍历快照中按升序保存的所有物品槽位喵~
+        for (Integer logicalSlot : context.snapshot().items().navigableKeySet()) {
+            // 跳过空键、非法键和容量外 overflow 槽位喵~
+            if (logicalSlot == null || logicalSlot <= 0 || logicalSlot > context.snapshot().capacity()) {
+                continue;
+            }
+            // 读取隔离后的目标物品副本喵~
+            ItemStack targetItem = ContainerTransaction.cloneOrNull(context.snapshot().itemAt(logicalSlot));
+            // 仅统计已有且未达到最大堆叠数的容量内槽位喵~
+            if (targetItem != null && targetItem.getAmount() < targetItem.getMaxStackSize()) {
+                // 增加一个可补货 PlayerBackpack 目标喵~
+                targetCount++;
+            }
+        }
+        // 返回准确的 PlayerBackpack 补货目标数量喵~
+        return targetCount;
+    }
+
     /**
      * Restock 扫描完成后：快照库存，提交异步规划，再回主线程执行补货
      *
@@ -786,7 +825,9 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
             return;
         }
 
-        if (containers.isEmpty() || whitelist.eligibleSlotsSorted().isEmpty()) {
+        // 只有没有任何容器来源，或两套目标都为空时才提前结束补货喵~
+        if (containers.isEmpty()
+                || (whitelist.eligibleSlotsSorted().isEmpty() && playerBackpackTargetCount(task) == 0)) {
             plugin.getMessageService().sendNoMatch(player);
             restockListener.stopTracking(task.getPlayerUuid(), whitelist);
             finishTask(task);

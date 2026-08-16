@@ -4,6 +4,10 @@ package io.github.autochest.integration.playerbackpack;
 import com.playerbackpack.api.BackpackMutationDirection;
 // 导入 PlayerBackpack mutation 请求模型喵~
 import com.playerbackpack.api.BackpackMutationRequest;
+// 导入 PlayerBackpack 容器位置描述模型喵~
+import com.playerbackpack.api.BackpackContainerDescriptor;
+// 导入 PlayerBackpack 容器 before/after 镜像模型喵~
+import com.playerbackpack.api.BackpackContainerMutation;
 // 导入 PlayerBackpack mutation 结果模型喵~
 import com.playerbackpack.api.BackpackMutationResult;
 // 导入 PlayerBackpack 快照模型喵~
@@ -96,6 +100,20 @@ public final class CrossStorageMutationCoordinator {
         BackpackMutationRequest request = new BackpackMutationRequest(mutationId, currentSnapshot.playerId(),
                 BackpackMutationDirection.DEPOSIT, currentSnapshot.revision(), logicalSlot,
                 sourceBefore, sourceAfter, amount);
+        // 从 Bukkit 库存位置构造可恢复的容器槽位描述喵~
+        BackpackContainerMutation containerMutation = createContainerMutation(containerInventory, containerSlot, targetBefore, targetAfter);
+        // 喵~防御：无法稳定定位容器时不得开始跨域提交喵~
+        if (containerMutation == null) {
+            // 返回未提交结果喵~
+            return skipped();
+        }
+        // 先 durable 写入双域完整 before/after intent，崩溃后由 PlayerBackpack 启动恢复隔离喵~
+        BackpackMutationResult preparationResult = context.adapter().prepareMutation(context.operation(), request, containerMutation);
+        // 只有成功准备或完全相同的幂等重放才能修改 PlayerBackpack 喵~
+        if (!preparationResult.applied()) {
+            // 保持两侧物品不变喵~
+            return skipped();
+        }
         // 先持久化 PlayerBackpack 来源扣除，杜绝 SQLite 失败导致容器复制喵~
         BackpackMutationResult mutationResult = context.adapter().applyMutation(context.operation(), request);
         // 仅已提交或幂等重放结果才允许写 Bukkit 容器喵~
@@ -109,17 +127,25 @@ public final class CrossStorageMutationCoordinator {
             containerInventory.setItem(containerSlot, targetAfter.clone());
         } catch (RuntimeException exception) {
             // Bukkit 写异常后尝试条件补偿 PlayerBackpack 来源喵~
-            return compensateOrFail(context, containerInventory, containerSlot, targetBefore,
-                    logicalSlot, sourceBefore, sourceAfter, amount, mutationId, exception);
+            return compensateOrFail(context, containerInventory, containerSlot, targetBefore, targetAfter,
+                    logicalSlot, sourceBefore, sourceAfter, amount, mutationId, BackpackMutationDirection.DEPOSIT, exception);
         }
         // 精确复核 Bukkit 容器写后镜像喵~
         if (sameSlot(containerInventory.getItem(containerSlot), targetAfter)) {
+            // 容器精确提交后 durable 终结 journal，失败时不可声明跨域操作成功喵~
+            if (context.adapter().markContainerApplied(context.operation(), mutationId)
+                    != com.playerbackpack.api.BackpackOperationFailure.NONE) {
+                // journal 未终结时保留可恢复记录并停止后续任务喵~
+                logger.severe("[AutoChest] 容器已提交但 journal 终结失败，必须人工 reconcile: mutation=" + mutationId);
+                // 返回不确定状态喵~
+                return new Result(Status.FAILED_UNRECOVERABLE, 0);
+            }
             // 两域已完成严格守恒移动喵~
             return new Result(Status.SUCCESS, amount);
         }
         // 写后不一致时尝试条件补偿 PlayerBackpack 来源喵~
-        return compensateOrFail(context, containerInventory, containerSlot, targetBefore,
-                logicalSlot, sourceBefore, sourceAfter, amount, mutationId, null);
+        return compensateOrFail(context, containerInventory, containerSlot, targetBefore, targetAfter,
+                logicalSlot, sourceBefore, sourceAfter, amount, mutationId, BackpackMutationDirection.DEPOSIT, null);
     }
 
     // 从 Bukkit 容器来源扣除后增加 PlayerBackpack 目标喵~
@@ -156,6 +182,20 @@ public final class CrossStorageMutationCoordinator {
         BackpackMutationRequest request = new BackpackMutationRequest(mutationId, currentSnapshot.playerId(),
                 BackpackMutationDirection.RESTOCK, currentSnapshot.revision(), logicalSlot,
                 targetBefore, targetAfter, amount);
+        // 从 Bukkit 库存位置构造可恢复的容器槽位描述喵~
+        BackpackContainerMutation containerMutation = createContainerMutation(containerInventory, containerSlot, sourceBefore, sourceAfter);
+        // 喵~防御：无法稳定定位容器时不得开始跨域提交喵~
+        if (containerMutation == null) {
+            // 返回未提交结果喵~
+            return skipped();
+        }
+        // 先 durable 写入双域完整 before/after intent，崩溃后由 PlayerBackpack 启动恢复隔离喵~
+        BackpackMutationResult preparationResult = context.adapter().prepareMutation(context.operation(), request, containerMutation);
+        // 只有成功准备或完全相同的幂等重放才能修改 PlayerBackpack 喵~
+        if (!preparationResult.applied()) {
+            // 保持两侧物品不变喵~
+            return skipped();
+        }
         // 先持久化 PlayerBackpack 目标增加，随后才扣减 Bukkit 容器来源喵~
         BackpackMutationResult mutationResult = context.adapter().applyMutation(context.operation(), request);
         // API 失败时不得扣减容器来源喵~
@@ -169,24 +209,32 @@ public final class CrossStorageMutationCoordinator {
             containerInventory.setItem(containerSlot, ContainerTransaction.cloneOrNull(sourceAfter));
         } catch (RuntimeException exception) {
             // Bukkit 写异常后尝试条件补偿 PlayerBackpack 目标喵~
-            return compensateOrFail(context, containerInventory, containerSlot, sourceBefore,
-                    logicalSlot, targetBefore, targetAfter, amount, mutationId, exception);
+            return compensateOrFail(context, containerInventory, containerSlot, sourceBefore, sourceAfter,
+                    logicalSlot, targetBefore, targetAfter, amount, mutationId, BackpackMutationDirection.RESTOCK, exception);
         }
         // 精确复核 Bukkit 容器来源写后镜像喵~
         if (sameSlot(containerInventory.getItem(containerSlot), sourceAfter)) {
+            // 容器精确提交后 durable 终结 journal，失败时不可声明跨域操作成功喵~
+            if (context.adapter().markContainerApplied(context.operation(), mutationId)
+                    != com.playerbackpack.api.BackpackOperationFailure.NONE) {
+                // journal 未终结时保留可恢复记录并停止后续任务喵~
+                logger.severe("[AutoChest] 容器已提交但 journal 终结失败，必须人工 reconcile: mutation=" + mutationId);
+                // 返回不确定状态喵~
+                return new Result(Status.FAILED_UNRECOVERABLE, 0);
+            }
             // 两域已完成严格守恒移动喵~
             return new Result(Status.SUCCESS, amount);
         }
         // 写后不一致时尝试条件补偿 PlayerBackpack 目标喵~
-        return compensateOrFail(context, containerInventory, containerSlot, sourceBefore,
-                logicalSlot, targetBefore, targetAfter, amount, mutationId, null);
+        return compensateOrFail(context, containerInventory, containerSlot, sourceBefore, sourceAfter,
+                logicalSlot, targetBefore, targetAfter, amount, mutationId, BackpackMutationDirection.RESTOCK, null);
     }
 
     // 尝试恢复 Bukkit 槽位并通过 API 条件恢复 PlayerBackpack 槽位喵~
     private Result compensateOrFail(PlayerBackpackTaskContext context, Inventory inventory, int bukkitSlot,
-                                    ItemStack bukkitBefore, int logicalSlot, ItemStack backpackBefore,
+                                    ItemStack bukkitBefore, ItemStack bukkitAfter, int logicalSlot, ItemStack backpackBefore,
                                     ItemStack backpackAfter, int amount, UUID originalMutationId,
-                                    RuntimeException writeException) {
+                                    BackpackMutationDirection originalDirection, RuntimeException writeException) {
         // 记录当前 Bukkit 槽位，供审计判断是否仍属于本事务喵~
         ItemStack currentBukkitItem;
         try {
@@ -199,19 +247,76 @@ public final class CrossStorageMutationCoordinator {
             // 返回不可恢复状态并停止任务喵~
             return new Result(Status.FAILED_UNRECOVERABLE, 0);
         }
-        // 只有仍然等于本事务 after-image 时才允许尝试回写 Bukkit before-image 喵~
-        if (sameSlot(currentBukkitItem, backpackAfter)) {
-            // 当前 API 缺少跨域事务统一 after-image，不能把 PlayerBackpack 物品误当成 Bukkit after-image 喵~
-            logger.warning("[AutoChest] 跨域失败后的 Bukkit 槽位镜像与独立 after-image 不可证明一致，跳过无条件恢复喵~");
+        // 只有容器仍是本事务写入后的 after-image 时，才允许恢复容器 before-image 喵~
+        if (!sameSlot(currentBukkitItem, bukkitAfter)) {
+            // 容器处于第三种状态时无法证明归属，必须保留现场并隔离任务喵~
+            logger.log(Level.SEVERE, "[AutoChest] 跨域失败后 Bukkit 槽位已被外部修改，必须人工 reconcile: mutation="
+                    + originalMutationId + " logicalSlot=" + logicalSlot, writeException);
+            // 返回不可恢复状态，禁止覆盖外部修改喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
         }
-        // 当前公开 API 不能表达空槽 expectedBefore，也没有 journal-backed compensate endpoint 喵~
-        logger.log(Level.SEVERE, "[AutoChest] 跨域 Bukkit 写入失败但当前 PlayerBackpack API 无法执行条件补偿，已中止任务: mutation="
+        try {
+            // 先条件恢复容器 before-image，避免覆盖外部并发修改喵~
+            inventory.setItem(bukkitSlot, ContainerTransaction.cloneOrNull(bukkitBefore));
+        } catch (RuntimeException restoreException) {
+            // 喵~防御：容器条件恢复异常时保留两域现场并记录审计喵~
+            logger.log(Level.SEVERE, "[AutoChest] 跨域失败后 Bukkit before-image 恢复失败，必须人工 reconcile: mutation="
+                    + originalMutationId + " logicalSlot=" + logicalSlot, restoreException);
+            // 返回不可恢复状态喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
+        // 精确复核容器已回到事务 before-image 喵~
+        if (!sameSlot(inventory.getItem(bukkitSlot), bukkitBefore)) {
+            // 喵~防御：恢复后镜像不一致时禁止声明补偿成功喵~
+            logger.log(Level.SEVERE, "[AutoChest] 跨域失败后 Bukkit before-image 复核失败，必须人工 reconcile: mutation="
+                    + originalMutationId + " logicalSlot=" + logicalSlot);
+            // 返回不可恢复状态喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
+        // 构造仅恢复本次 PlayerBackpack 槽位的独立补偿 mutation id 喵~
+        UUID compensationMutationId = UUID.randomUUID();
+        // 使用 PB 已提交 after-image 作为 CAS before-image，恢复到原始 before-image 喵~
+        BackpackMutationRequest compensationRequest = new BackpackMutationRequest(
+                compensationMutationId, context.operation().targetId(), originalDirection,
+                context.snapshot().revision(), logicalSlot, backpackAfter, backpackBefore, amount);
+        // 在容器已精确恢复后执行 journal-backed 条件补偿，避免产生新的重复物品喵~
+        BackpackMutationResult compensationResult = context.adapter().applyCompensation(
+                context.operation(), originalMutationId, compensationRequest);
+        // 只有已提交或幂等重放且快照存在并严格推进上下文时才确认完全恢复喵~
+        if (compensationResult.applied() && compensationResult.snapshot() != null
+                && context.advance(compensationResult.snapshot())) {
+            // 两侧均回到 before-image，报告已恢复且不计入成功搬运喵~
+            return new Result(Status.RECOVERED, 0);
+        }
+        // 补偿未确认时保留 journal 供启动恢复，禁止继续执行任务喵~
+        logger.log(Level.SEVERE, "[AutoChest] 跨域 PlayerBackpack 条件补偿失败，必须人工 reconcile: mutation="
                 + originalMutationId + " logicalSlot=" + logicalSlot + " amount=" + amount, writeException);
         // 返回不确定状态，调用方必须停止任务并释放操作会话喵~
         return new Result(Status.FAILED_UNRECOVERABLE, 0);
     }
 
-    // 校验公共请求参数喵~
+    // 从 Bukkit 容器库存构造 durable journal 使用的位置与槽位完整镜像喵~
+    private BackpackContainerMutation createContainerMutation(Inventory inventory, int slot,
+                                                              ItemStack before, ItemStack after) {
+        // 喵~防御：库存或槽位无效时不能构造可恢复容器 identity 喵~
+        if (inventory == null || slot < 0 || slot >= inventory.getSize()) {
+            // 返回空值阻止跨域写入喵~
+            return null;
+        }
+        // 获取 Bukkit 为方块容器提供的位置快照喵~
+        org.bukkit.Location location = inventory.getLocation();
+        // 喵~防御：玩家库存、虚拟库存或无世界位置的库存不能参与 durable 跨域事务喵~
+        if (location == null || location.getWorld() == null) {
+            // 返回空值保持双方物品不变喵~
+            return null;
+        }
+        // 创建不持有 Bukkit 对象的容器位置描述喵~
+        BackpackContainerDescriptor descriptor = new BackpackContainerDescriptor(
+                location.getWorld().getUID(), location.getBlockX(), location.getBlockY(), location.getBlockZ(), slot);
+        // 返回深复制前后镜像的容器 mutation 意图喵~
+        return new BackpackContainerMutation(descriptor, before, after);
+    }
+
     private boolean isValidRequest(PlayerBackpackTaskContext context, Inventory inventory,
                                    int bukkitSlot, int logicalSlot, int amount) {
         // 只有会话仍打开、库存非空且槽位数量合法时才允许跨域 mutation 喵~
