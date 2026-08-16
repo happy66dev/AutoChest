@@ -366,6 +366,19 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         }
         // 下一 tick 读取关闭 GUI 后的最新 snapshot 喵~
         Bukkit.getScheduler().runTask(plugin, () -> {
+            // 下一 tick 复核目标 GUI 已关闭，阻止迟到关闭事件覆盖外部 mutation 喵~
+            BackpackOperationFailure readinessFailure = adapter.confirmExternalOperationReady(operation);
+            // 喵~防御：无法证明 GUI 已关闭时释放 operation，不创建任务喵~
+            if (readinessFailure != BackpackOperationFailure.NONE) {
+                // 释放未能进入安全状态的外部会话喵~
+                adapter.finish(operation);
+                // 玩家仍在线时明确提示本次跨域任务取消喵~
+                if (player.isOnline()) {
+                    plugin.getMessageService().sendCancelled(player);
+                }
+                // 结束下一 tick 预备流程喵~
+                return;
+            }
             // 喵~防御：下一 tick 读取失败时释放会话而不创建任务喵~
             Optional<BackpackSnapshot> snapshotOptional = adapter.loadSnapshot(player.getUniqueId());
             if (snapshotOptional.isEmpty()) {

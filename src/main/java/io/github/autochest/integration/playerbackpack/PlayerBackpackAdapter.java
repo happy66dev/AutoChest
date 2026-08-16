@@ -69,7 +69,27 @@ public final class PlayerBackpackAdapter {
         }
     }
 
+    // 在下一 tick 建立快照前确认 provider 已关闭全部目标 GUI 喵~
+    public BackpackOperationFailure confirmExternalOperationReady(BackpackOperation operation) {
+        // 喵~防御：操作句柄为空时不能确认 GUI 冻结状态喵~
+        if (operation == null) {
+            // 返回前置条件失败喵~
+            return BackpackOperationFailure.PRECONDITION_FAILED;
+        }
+        try {
+            // 调用 provider 的显式 GUI 关闭确认接口喵~
+            return toFailure(invoke("confirmExternalOperationReady", operation.nativeHandle()));
+        } catch (Throwable exception) {
+            // 喵~防御：provider 缺少确认接口或运行失败时拒绝跨域任务喵~
+            log(Level.SEVERE, "confirmExternalOperationReady", operation.targetId(), exception);
+            // 返回服务不可用喵~
+            return BackpackOperationFailure.SERVICE_UNAVAILABLE;
+        }
+    }
+
+    // 应用受 revision 和 before-image 保护的幂等 mutation 喵~
     public BackpackMutationResult applyMutation(BackpackOperation operation, BackpackMutationRequest request) {
+        // 喵~防御：操作句柄和 mutation 请求不能为空喵~
         if (operation == null || request == null) {
             return failed(BackpackMutationResult.Status.SERVICE_UNAVAILABLE, "操作或请求为空喵~");
         }
