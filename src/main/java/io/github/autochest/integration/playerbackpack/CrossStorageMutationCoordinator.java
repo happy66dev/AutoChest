@@ -1,17 +1,18 @@
 package io.github.autochest.integration.playerbackpack;
 
 // 导入 PlayerBackpack mutation 方向枚举喵~
-import com.playerbackpack.api.BackpackMutationDirection;
-// 导入 PlayerBackpack mutation 请求模型喵~
-import com.playerbackpack.api.BackpackMutationRequest;
-// 导入 PlayerBackpack 容器位置描述模型喵~
-import com.playerbackpack.api.BackpackContainerDescriptor;
-// 导入 PlayerBackpack 容器 before/after 镜像模型喵~
-import com.playerbackpack.api.BackpackContainerMutation;
-// 导入 PlayerBackpack mutation 结果模型喵~
-import com.playerbackpack.api.BackpackMutationResult;
-// 导入 PlayerBackpack 快照模型喵~
-import com.playerbackpack.api.BackpackSnapshotView;
+// 使用本地中立 mutation 方向模型，避免静态依赖可选 API 喵~
+import io.github.autochest.integration.playerbackpack.BackpackMutationDirection;
+// 使用本地中立 mutation 请求模型喵~
+import io.github.autochest.integration.playerbackpack.BackpackMutationRequest;
+// 使用本地中立容器位置描述模型喵~
+import io.github.autochest.integration.playerbackpack.BackpackContainerDescriptor;
+// 使用本地中立容器 mutation 模型喵~
+import io.github.autochest.integration.playerbackpack.BackpackContainerMutation;
+// 使用本地中立 mutation 结果模型喵~
+import io.github.autochest.integration.playerbackpack.BackpackMutationResult;
+// 使用本地中立快照模型喵~
+import io.github.autochest.integration.playerbackpack.BackpackSnapshot;
 // 导入 AutoChest 容器事务共享的物品复制工具喵~
 import io.github.autochest.service.ContainerTransaction;
 // 导入 Bukkit 库存类型喵~
@@ -75,7 +76,7 @@ public final class CrossStorageMutationCoordinator {
             return skipped();
         }
         // 读取当前已确认快照中的 PlayerBackpack 来源镜像喵~
-        BackpackSnapshotView currentSnapshot = context.snapshot();
+        BackpackSnapshot currentSnapshot = context.snapshot();
         // 克隆来源物品以隔离 API 返回引用喵~
         ItemStack sourceBefore = ContainerTransaction.cloneOrNull(currentSnapshot.itemAt(logicalSlot));
         // 克隆 Bukkit 容器目标镜像喵~
@@ -134,7 +135,7 @@ public final class CrossStorageMutationCoordinator {
         if (sameSlot(containerInventory.getItem(containerSlot), targetAfter)) {
             // 容器精确提交后 durable 终结 journal，失败时不可声明跨域操作成功喵~
             if (context.adapter().markContainerApplied(context.operation(), mutationId)
-                    != com.playerbackpack.api.BackpackOperationFailure.NONE) {
+                    != BackpackOperationFailure.NONE) {
                 // journal 未终结时保留可恢复记录并停止后续任务喵~
                 logger.severe("[AutoChest] 容器已提交但 journal 终结失败，必须人工 reconcile: mutation=" + mutationId);
                 // 返回不确定状态喵~
@@ -157,7 +158,7 @@ public final class CrossStorageMutationCoordinator {
             return skipped();
         }
         // 读取当前已确认快照中的 PlayerBackpack 目标镜像喵~
-        BackpackSnapshotView currentSnapshot = context.snapshot();
+        BackpackSnapshot currentSnapshot = context.snapshot();
         // 克隆 Bukkit 容器来源镜像喵~
         ItemStack sourceBefore = ContainerTransaction.cloneOrNull(containerInventory.getItem(containerSlot));
         // 克隆 PlayerBackpack 目标镜像喵~
@@ -216,7 +217,7 @@ public final class CrossStorageMutationCoordinator {
         if (sameSlot(containerInventory.getItem(containerSlot), sourceAfter)) {
             // 容器精确提交后 durable 终结 journal，失败时不可声明跨域操作成功喵~
             if (context.adapter().markContainerApplied(context.operation(), mutationId)
-                    != com.playerbackpack.api.BackpackOperationFailure.NONE) {
+                    != BackpackOperationFailure.NONE) {
                 // journal 未终结时保留可恢复记录并停止后续任务喵~
                 logger.severe("[AutoChest] 容器已提交但 journal 终结失败，必须人工 reconcile: mutation=" + mutationId);
                 // 返回不确定状态喵~

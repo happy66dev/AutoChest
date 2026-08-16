@@ -9,9 +9,9 @@ import io.github.autochest.gui.PreferencesGui;
 import io.github.autochest.integration.playerbackpack.PlayerBackpackAdapter;
 import io.github.autochest.integration.playerbackpack.PlayerBackpackTaskContext;
 import io.github.autochest.integration.playerbackpack.PlayerBackpackTaskContexts;
-import com.playerbackpack.api.BackpackOperationFailure;
-import com.playerbackpack.api.BackpackSnapshotView;
-import com.playerbackpack.api.PlayerBackpackOperation;
+import io.github.autochest.integration.playerbackpack.BackpackOperationFailure;
+import io.github.autochest.integration.playerbackpack.BackpackOperation;
+import io.github.autochest.integration.playerbackpack.BackpackSnapshot;
 import io.github.autochest.preference.ContainerOrderMode;
 import io.github.autochest.preference.OperationPreferencesSnapshot;
 import io.github.autochest.preference.PlayerPreferencesService;
@@ -342,7 +342,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
             return false;
         }
         // 尝试取得当前玩家目标背包独占会话喵~
-        Optional<PlayerBackpackOperation> operationOptional = adapter.tryBeginOperation(
+        Optional<BackpackOperation> operationOptional = adapter.tryBeginOperation(
                 player.getUniqueId(), player.getUniqueId(), operationType.name().toLowerCase(Locale.ROOT));
         // 喵~防御：目标繁忙或 provider 异常时 fail-closed 拒绝扩展任务喵~
         if (operationOptional.isEmpty()) {
@@ -352,7 +352,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
             return true;
         }
         // 取得独占操作句柄喵~
-        PlayerBackpackOperation operation = operationOptional.get();
+        BackpackOperation operation = operationOptional.get();
         // 保存并关闭所有相关 PlayerBackpack GUI 喵~
         BackpackOperationFailure freezeFailure = adapter.saveAndCloseOpenGui(operation);
         // 只有 NONE 表示冻结成功喵~
@@ -367,7 +367,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         // 下一 tick 读取关闭 GUI 后的最新 snapshot 喵~
         Bukkit.getScheduler().runTask(plugin, () -> {
             // 喵~防御：下一 tick 读取失败时释放会话而不创建任务喵~
-            Optional<BackpackSnapshotView> snapshotOptional = adapter.loadSnapshot(player.getUniqueId());
+            Optional<BackpackSnapshot> snapshotOptional = adapter.loadSnapshot(player.getUniqueId());
             if (snapshotOptional.isEmpty()) {
                 // 释放无法建立快照的外部操作喵~
                 adapter.finish(operation);

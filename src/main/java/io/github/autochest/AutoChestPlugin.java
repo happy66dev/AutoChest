@@ -108,6 +108,8 @@ public class AutoChestPlugin extends JavaPlugin {
         accessPolicy = new CompositeAccessPolicy(policies, getLogger());
         // 初始化 PlayerBackpack 可选 API Hook，失败时只关闭扩展能力。
         playerBackpackHook = new PlayerBackpackHook(getLogger());
+        // 监听可选 API 服务注册与撤销，支持延迟启用并及时丢弃失效 provider 喵~
+        getServer().getPluginManager().registerEvents(playerBackpackHook, this);
         // 创建跨域任务会话表，所有任务出口共享同一释放路径。
         playerBackpackTaskContexts = new PlayerBackpackTaskContexts();
         // 创建独立双域协调器，内部 fail-closed 处理 API 与 Bukkit 交错失败。
