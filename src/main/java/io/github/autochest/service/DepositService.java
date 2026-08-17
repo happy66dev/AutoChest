@@ -118,12 +118,12 @@ public class DepositService {
 
         World world = player.getWorld();
 
-        // 收集玩家主背包 9..35 的物品快照（用于计算剩余需求）
-        // 每次让出后重新读取，保证剩余量基于实时状态
+        // 收集玩家完整背包 0..35 的物品快照（用于计算剩余需求）。
+        // 每次让出后重新读取，保证剩余量基于实时状态。
         Map<Integer, ItemStack> playerItems = new LinkedHashMap<>();
-        for (int slot = 9; slot <= 35; slot++) {
-            // 被任务快照锁定的主背包格不属于本次整理来源。
-            if (playerTask.getPreferencesSnapshot().isLockedInventorySlot(slot)) {
+        for (int slot = 0; slot <= 35; slot++) {
+            // 仅允许任务快照授权 deposit 的槽位作为整理来源。
+            if (!playerTask.getPreferencesSnapshot().allowsDeposit(slot)) {
                 continue;
             }
             ItemStack item = ContainerTransaction.cloneOrNull(player.getInventory().getItem(slot));
@@ -368,10 +368,10 @@ public class DepositService {
         Inventory containerInventory = validationResult.inventory;
         int itemsBeforeThisContainer = stats.itemsMoved;
 
-        // 遍历玩家主背包 9..35 的每个非空、未锁定槽位。
-        for (int playerSlot = 9; playerSlot <= 35; playerSlot++) {
-            // 被任务创建时冻结的锁定格不能参与任一存入阶段。
-            if (playerTask.getPreferencesSnapshot().isLockedInventorySlot(playerSlot)) {
+        // 遍历玩家背包 0..35 的每个非空且允许整理的槽位。
+        for (int playerSlot = 0; playerSlot <= 35; playerSlot++) {
+            // 被任务创建时冻结为禁止 deposit 的槽位不能参与任一存入阶段。
+            if (!playerTask.getPreferencesSnapshot().allowsDeposit(playerSlot)) {
                 continue;
             }
             ItemStack playerItem = ContainerTransaction.cloneOrNull(player.getInventory().getItem(playerSlot));

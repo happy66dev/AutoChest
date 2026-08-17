@@ -2,6 +2,7 @@ package io.github.autochest.gui;
 
 import io.github.autochest.container.ContainerIdentity;
 import io.github.autochest.preference.ContainerOrderMode;
+import io.github.autochest.preference.InventorySlotMode;
 import io.github.autochest.preference.OperationPreferencesSnapshot;
 import io.github.autochest.preference.PlayerPreferencesService;
 import io.github.autochest.task.OperationType;
@@ -30,7 +31,7 @@ public final class PreferencesGui {
     /** 主菜单中 restock 入口的槽位。 */
     private static final int MAIN_RESTOCK_SLOT = 15;
 
-    /** 主菜单中锁定主背包格入口的槽位。 */
+    /** 主菜单中背包槽位权限入口的槽位。 */
     private static final int MAIN_LOCKED_SLOTS_SLOT = 13;
 
     /** 主菜单中关闭按钮的槽位。 */
@@ -69,8 +70,8 @@ public final class PreferencesGui {
     /** 锁定格页面中主背包预览网格的起始槽位。 */
     private static final int LOCKED_SLOTS_GRID_START = 18;
 
-    /** 锁定格页面中主背包预览槽位数量。 */
-    private static final int LOCKED_SLOTS_GRID_SIZE = 27;
+    /** 槽位权限页面中玩家背包预览槽位数量。 */
+    private static final int LOCKED_SLOTS_GRID_SIZE = 36;
 
     /** 固定显示与配置的五种容器类型。 */
     private static final List<ContainerIdentity.ContainerType> DISPLAY_TYPES = List.of(
@@ -130,9 +131,9 @@ public final class PreferencesGui {
         // 放入 restock 设置入口。
         inventory.setItem(MAIN_RESTOCK_SLOT, createItem(Material.ENDER_CHEST, "§b📤 补货设置",
                 List.of("§7配置 restock 的容器黑名单", "§7排序模式与种类优先级", "§e点击打开")));
-        // 放入仅影响 deposit 的主背包锁定格入口。
-        inventory.setItem(MAIN_LOCKED_SLOTS_SLOT, createItem(Material.TRIPWIRE_HOOK, "§e🔒 锁定格",
-                List.of("§7锁定主背包格，整理时跳过", "§7仅影响 deposit", "§e点击打开")));
+        // 放入同时控制整理和补货的背包槽位权限入口。
+        inventory.setItem(MAIN_LOCKED_SLOTS_SLOT, createItem(Material.TRIPWIRE_HOOK, "§e🎛 槽位权限",
+                List.of("§7配置快捷栏与主背包格", "§7整理和补货的四态权限", "§e点击打开")));
         // 放入关闭按钮。
         inventory.setItem(MAIN_CLOSE_SLOT, createItem(Material.BARRIER, "§c关闭菜单",
                 List.of("§7不修改任何配置")));
@@ -187,11 +188,11 @@ public final class PreferencesGui {
         // 创建专属 Holder，锁定页不需要操作类型上下文。
         PreferencesGuiHolder holder = new PreferencesGuiHolder(player.getUniqueId(), sessionToken,
                 PreferencesGuiHolder.PageType.LOCKED_INVENTORY_SLOTS, null);
-        // 创建六行库存，为控制栏和完整 27 格预览留出独立空间。
-        Inventory inventory = Bukkit.createInventory(holder, 54, "§8AutoChest 锁定格");
+        // 创建六行库存，为控制栏和完整 36 格背包预览留出独立空间。
+        Inventory inventory = Bukkit.createInventory(holder, 54, "§8AutoChest 槽位权限");
         // 将库存实例绑定给 Holder。
         holder.bindInventory(inventory);
-        // 绘制锁定格控制栏与玩家主背包预览。
+        // 绘制槽位权限控制栏与完整玩家背包预览。
         renderLockedInventorySlots(inventory, player, snapshot);
         // 打开完成后的锁定格页面。
         player.openInventory(inventory);
@@ -265,12 +266,13 @@ public final class PreferencesGui {
         if (inventorySlot < 0) {
             return;
         }
-        // 读取最新 deposit 快照，计算本次点击后的目标状态。
+        // 获取最新的共享槽位权限快照，保证页面显示两个操作的真实状态。
         OperationPreferencesSnapshot snapshot = preferencesService.snapshot(
                 player.getUniqueId(), OperationType.DEPOSIT);
-        // 写入相反锁定状态；无论是否变化都重绘以保持显示同步。
-        preferencesService.setLockedInventorySlot(player.getUniqueId(), inventorySlot,
-                !snapshot.isLockedInventorySlot(inventorySlot));
+        // 获取当前槽位状态并轮换到下一个四态。
+        InventorySlotMode nextMode = snapshot.getInventorySlotMode(inventorySlot).next();
+        // 持久化新的共享槽位权限。
+        preferencesService.setInventorySlotMode(player.getUniqueId(), inventorySlot, nextMode);
         // 新页面生成 token，确保旧点击无法继续修改配置。
         openLockedInventorySlots(player);
     }
@@ -283,7 +285,7 @@ public final class PreferencesGui {
         if (rawSlot < LOCKED_SLOTS_GRID_START || rawSlot >= gridEndExclusive) {
             return -1;
         }
-        // 将 GUI 相对索引映射到 Deposit 使用的 Bukkit 主背包槽位。
+        // 将 GUI 相对索引映射到 Bukkit 玩家背包的完整 0..35 范围。
         return OperationPreferencesSnapshot.FIRST_LOCKABLE_INVENTORY_SLOT
                 + rawSlot - LOCKED_SLOTS_GRID_START;
     }
@@ -382,7 +384,7 @@ public final class PreferencesGui {
         // 放置关闭按钮。
         inventory.setItem(LOCKED_SLOTS_CLOSE_SLOT, createItem(Material.BARRIER, "§c关闭菜单",
                 List.of("§7配置已自动进入保存队列")));
-        // 为每个 Deposit 主背包槽位创建独立的展示副本。
+        // 为每个 0..35 玩家背包槽位创建独立的展示副本。
         for (int offset = 0; offset < LOCKED_SLOTS_GRID_SIZE; offset++) {
             // 将网格相对位置转换为真实玩家背包槽位。
             int inventorySlot = OperationPreferencesSnapshot.FIRST_LOCKABLE_INVENTORY_SLOT + offset;
@@ -390,10 +392,10 @@ public final class PreferencesGui {
             int displaySlot = LOCKED_SLOTS_GRID_START + offset;
             // 读取玩家当前槽位并克隆，禁止 GUI 与实际背包共享 ItemStack 引用。
             ItemStack playerItem = player.getInventory().getItem(inventorySlot);
-            // 根据槽位锁定状态选择渲染标识。
-            boolean locked = snapshot.isLockedInventorySlot(inventorySlot);
+            // 获取当前四态权限用于渲染。
+            InventorySlotMode mode = snapshot.getInventorySlotMode(inventorySlot);
             // 将状态化展示物品放入独立 GUI 槽位。
-            inventory.setItem(displaySlot, createLockedInventorySlotItem(playerItem, inventorySlot, locked));
+            inventory.setItem(displaySlot, createLockedInventorySlotItem(playerItem, inventorySlot, mode));
         }
     }
 
@@ -405,10 +407,11 @@ public final class PreferencesGui {
      * @param locked 当前是否锁定。
      * @return 仅用于 GUI 展示的独立物品副本。
      */
-    private ItemStack createLockedInventorySlotItem(ItemStack playerItem, int inventorySlot, boolean locked) {
-        // 空槽使用可点击的玻璃板占位，确保空槽也能锁定。
+    private ItemStack createLockedInventorySlotItem(ItemStack playerItem, int inventorySlot,
+                                                    InventorySlotMode mode) {
+        // 空槽按四态使用不同颜色玻璃板占位，确保空槽也能配置。
         ItemStack displayItem = playerItem == null || playerItem.getType().isAir()
-                ? new ItemStack(locked ? Material.RED_STAINED_GLASS_PANE : Material.LIME_STAINED_GLASS_PANE)
+                ? new ItemStack(materialForSlotMode(mode))
                 : playerItem.clone();
         // 获取展示副本元数据。
         ItemMeta meta = displayItem.getItemMeta();
@@ -418,16 +421,20 @@ public final class PreferencesGui {
         }
         // 空槽使用状态名称，非空槽保留物品名称并在 lore 标记状态。
         if (playerItem == null || playerItem.getType().isAir()) {
-            meta.setDisplayName(locked ? "§c已锁定空槽" : "§a可整理空槽");
+            meta.setDisplayName(slotModeColor(mode) + mode.displayName() + "空槽");
         }
         // 创建不复用原物品 lore 的状态说明。
         List<String> lore = new ArrayList<>();
         // 说明真实 Bukkit 槽位，便于玩家确认映射关系。
-        lore.add("§7主背包槽位: " + inventorySlot);
-        // 明确显示当前 deposit 行为。
-        lore.add(locked ? "§c状态: 已锁定，整理时跳过" : "§a状态: 可整理");
-        // 提示玩家点击可切换状态。
-        lore.add("§e点击切换锁定状态");
+        lore.add("§7背包槽位: " + inventorySlot);
+        // 明确显示当前四态权限。
+        lore.add(slotModeColor(mode) + "状态: " + mode.displayName());
+        // 显示整理权限，避免玩家依赖颜色猜测。
+        lore.add(mode.allowsDeposit() ? "§a整理: 允许" : "§c整理: 禁止");
+        // 显示补货权限，避免玩家依赖颜色猜测。
+        lore.add(mode.allowsRestock() ? "§a补货: 允许" : "§c补货: 禁止");
+        // 提示玩家点击可按固定顺序轮换状态。
+        lore.add("§e点击切换到: " + mode.next().displayName());
         // 设置状态说明，避免将玩家物品原 lore 当作配置来源。
         meta.setLore(lore);
         // 隐藏默认属性，保持 GUI 展示整洁。
@@ -436,6 +443,42 @@ public final class PreferencesGui {
         displayItem.setItemMeta(meta);
         // 返回只属于 GUI 的物品副本。
         return displayItem;
+    }
+
+    /** 根据四态返回空槽占位材料。 */
+    private Material materialForSlotMode(InventorySlotMode mode) {
+        // 空状态或双允许状态使用绿色，保证渲染异常时保守显示默认状态。
+        if (mode == null || mode == InventorySlotMode.ALLOW_BOTH) {
+            return Material.LIME_STAINED_GLASS_PANE;
+        }
+        // 仅整理使用黄色便于与双允许区分。
+        if (mode == InventorySlotMode.DEPOSIT_ONLY) {
+            return Material.YELLOW_STAINED_GLASS_PANE;
+        }
+        // 仅补货使用蓝色与旧锁定迁移含义保持直观。
+        if (mode == InventorySlotMode.RESTOCK_ONLY) {
+            return Material.LIGHT_BLUE_STAINED_GLASS_PANE;
+        }
+        // 完全禁用使用红色明确提醒。
+        return Material.RED_STAINED_GLASS_PANE;
+    }
+
+    /** 根据四态返回 lore 与空槽名称的颜色。 */
+    private String slotModeColor(InventorySlotMode mode) {
+        // 双允许使用绿色。
+        if (mode == null || mode == InventorySlotMode.ALLOW_BOTH) {
+            return "§a";
+        }
+        // 仅整理使用黄色。
+        if (mode == InventorySlotMode.DEPOSIT_ONLY) {
+            return "§e";
+        }
+        // 仅补货使用蓝色。
+        if (mode == InventorySlotMode.RESTOCK_ONLY) {
+            return "§b";
+        }
+        // 完全禁用使用红色。
+        return "§c";
     }
 
     /** 渲染单操作配置页面。 */

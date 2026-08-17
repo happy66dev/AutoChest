@@ -172,6 +172,12 @@ public class RestockService {
         while (si < eligibleSlots.size()) {
             int playerSlot = eligibleSlots.get(si);
 
+            // 任务快照禁止补货的槽位即使白名单残留也必须跳过。
+            if (!playerTask.getPreferencesSnapshot().allowsRestock(playerSlot)) {
+                si++;
+                containerIndex = 0;
+                continue;
+            }
             // 实时检查槽位资格
             ItemStack currentItem = ContainerTransaction.cloneOrNull(player.getInventory().getItem(playerSlot));
             if (!whitelist.isEligible(playerSlot, currentItem)) {
@@ -298,6 +304,10 @@ public class RestockService {
                 continue;
             }
 
+            // 喵~防御：任务快照禁止补货时不得向该槽位提交事务。
+            if (!playerTask.getPreferencesSnapshot().allowsRestock(playerSlot)) {
+                return ContainerOutcome.CONTINUE;
+            }
             // 喵~防御：每次提交前重新确认任务和目标槽位仍有效，避免事件或生命周期变化后写入。
             ItemStack submitPlayerItem = ContainerTransaction.cloneOrNull(player.getInventory().getItem(playerSlot));
             if (!registry.isValid(playerTask) || !whitelist.isEligible(playerSlot, submitPlayerItem)) {

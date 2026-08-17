@@ -1,5 +1,6 @@
 package io.github.autochest.service;
 
+import io.github.autochest.preference.OperationPreferencesSnapshot;
 import org.bukkit.inventory.ItemStack;
 
 import java.util.*;
@@ -44,23 +45,30 @@ public class RestockTargetWhitelist {
      *
      * @param player 执行 restock 的玩家
      */
-    public RestockTargetWhitelist(org.bukkit.entity.Player player) {
+    public RestockTargetWhitelist(org.bukkit.entity.Player player,
+                                  OperationPreferencesSnapshot preferencesSnapshot) {
         Map<Integer, SlotEntry> map = new LinkedHashMap<>();
-        // 遍历主背包+快捷栏 0..35，记录初始状态
+        // 遍历完整玩家背包 0..35，记录任务快照允许补货的目标。
         for (int slot = 0; slot <= 35; slot++) {
+            // 喵~防御：缺少权限快照或槽位禁止 restock 时跳过目标。
+            if (preferencesSnapshot == null || !preferencesSnapshot.allowsRestock(slot)) {
+                continue;
+            }
             ItemStack item = player.getInventory().getItem(slot);
             if (item == null || item.getType().isAir()) {
-                // 空槽不纳入目标
                 continue;
             }
             if (item.getAmount() >= item.getMaxStackSize()) {
-                // 已满堆叠不需要补货
                 continue;
             }
-            // 深拷贝，不保留原始引用
             map.put(slot, new SlotEntry(item.clone(), item.getMaxStackSize()));
         }
         this.entries = Collections.unmodifiableMap(map);
+    }
+
+    /** 兼容旧调用方，默认所有槽位允许补货。 */
+    public RestockTargetWhitelist(org.bukkit.entity.Player player) {
+        this(player, OperationPreferencesSnapshot.defaults());
     }
 
     /**

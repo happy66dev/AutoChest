@@ -1,5 +1,9 @@
 package io.github.autochest.service;
 
+import io.github.autochest.preference.InventorySlotMode;
+import io.github.autochest.preference.OperationPreferencesSnapshot;
+import java.util.Map;
+import java.util.Set;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
@@ -47,8 +51,20 @@ class RestockTargetWhitelistTest {
     }
 
     /**
-     * 外部库存事件失效后，即使槽位恢复相似物品也不得重新获得资格
+     * 任务快照禁止补货的槽位不能在白名单中成为目标。
      */
+    @Test
+    void constructor_excludesSlotsWithoutRestockPermission() {
+        // 创建将槽位 0 设为仅整理的任务快照。
+        OperationPreferencesSnapshot snapshot = new OperationPreferencesSnapshot(
+                null, Set.of(), java.util.List.of(), Map.of(0, InventorySlotMode.DEPOSIT_ONLY));
+        // 使用冻结权限快照构建白名单。
+        RestockTargetWhitelist whitelist = new RestockTargetWhitelist(player, snapshot);
+        // 验证禁止补货槽位没有进入目标白名单。
+        assertFalse(whitelist.eligibleSlotsSorted().contains(0));
+    }
+
+
     @Test
     void invalidateSlot_makesSimilarItemPermanentlyIneligible() {
         RestockTargetWhitelist whitelist = new RestockTargetWhitelist(player);

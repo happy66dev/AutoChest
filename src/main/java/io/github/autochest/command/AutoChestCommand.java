@@ -284,13 +284,13 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
 
         // 可用时先冻结 PlayerBackpack GUI，再在下一 tick 同步建立双域白名单。
         if (beginPlayerBackpackThenNextTick(player, OperationType.RESTOCK,
-                () -> beginRestockTask(player, new RestockTargetWhitelist(player), preferencesSnapshot))) {
+                () -> beginRestockTask(player, new RestockTargetWhitelist(player, preferencesSnapshot), preferencesSnapshot))) {
             // 预备流程已异步接管任务创建喵~
             return;
         }
 
         // PlayerBackpack 不可用时在命令 tick 建立原版白名单并保持原有流程喵~
-        beginRestockTask(player, new RestockTargetWhitelist(player), preferencesSnapshot);
+        beginRestockTask(player, new RestockTargetWhitelist(player, preferencesSnapshot), preferencesSnapshot);
     }
 
     // 在预备阶段完成后创建原版补货任务喵~
