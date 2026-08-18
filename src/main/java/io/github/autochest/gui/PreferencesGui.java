@@ -67,11 +67,11 @@ public final class PreferencesGui {
     /** 锁定格页面中关闭按钮的槽位。 */
     private static final int LOCKED_SLOTS_CLOSE_SLOT = 8;
 
-    /** 锁定格页面中主背包预览网格的起始槽位。 */
-    private static final int LOCKED_SLOTS_GRID_START = 18;
+    /** 槽位权限页面中玩家背包预览网格的起始槽位。 */
+    private static final int LOCKED_SLOTS_GRID_START = InventorySlotLayout.GRID_START;
 
     /** 槽位权限页面中玩家背包预览槽位数量。 */
-    private static final int LOCKED_SLOTS_GRID_SIZE = 36;
+    private static final int LOCKED_SLOTS_GRID_SIZE = InventorySlotLayout.GRID_SIZE;
 
     /** 固定显示与配置的五种容器类型。 */
     private static final List<ContainerIdentity.ContainerType> DISPLAY_TYPES = List.of(
@@ -277,17 +277,10 @@ public final class PreferencesGui {
         openLockedInventorySlots(player);
     }
 
-    /** 将锁定页预览 raw slot 转换为玩家主背包 Bukkit 槽位。 */
+    /** 将槽位权限页 raw slot 转换为实际布局中的 Bukkit 玩家背包槽位。 */
     private int lockedInventorySlotAt(int rawSlot) {
-        // 计算预览网格末尾的排他槽位。
-        int gridEndExclusive = LOCKED_SLOTS_GRID_START + LOCKED_SLOTS_GRID_SIZE;
-        // 喵~防御：仅连续 27 格预览区域能对应玩家主背包。
-        if (rawSlot < LOCKED_SLOTS_GRID_START || rawSlot >= gridEndExclusive) {
-            return -1;
-        }
-        // 将 GUI 相对索引映射到 Bukkit 玩家背包的完整 0..35 范围。
-        return OperationPreferencesSnapshot.FIRST_LOCKABLE_INVENTORY_SLOT
-                + rawSlot - LOCKED_SLOTS_GRID_START;
+        // 委托统一布局映射，保证点击与渲染使用同一份视觉顺序。
+        return InventorySlotLayout.inventorySlotAt(rawSlot);
     }
 
     /** 处理操作页面按钮。 */
@@ -384,12 +377,15 @@ public final class PreferencesGui {
         // 放置关闭按钮。
         inventory.setItem(LOCKED_SLOTS_CLOSE_SLOT, createItem(Material.BARRIER, "§c关闭菜单",
                 List.of("§7配置已自动进入保存队列")));
-        // 为每个 0..35 玩家背包槽位创建独立的展示副本。
-        for (int offset = 0; offset < LOCKED_SLOTS_GRID_SIZE; offset++) {
-            // 将网格相对位置转换为真实玩家背包槽位。
-            int inventorySlot = OperationPreferencesSnapshot.FIRST_LOCKABLE_INVENTORY_SLOT + offset;
-            // 将网格相对位置转换为顶部库存原始槽位。
-            int displaySlot = LOCKED_SLOTS_GRID_START + offset;
+        // 按真实 Bukkit 槽位遍历，使用逆向映射放入对应视觉位置。
+        for (int inventorySlot = OperationPreferencesSnapshot.FIRST_LOCKABLE_INVENTORY_SLOT;
+             inventorySlot <= OperationPreferencesSnapshot.LAST_LOCKABLE_INVENTORY_SLOT; inventorySlot++) {
+            // 计算当前真实槽位在 GUI 中的显示位置。
+            int displaySlot = InventorySlotLayout.rawSlotAt(inventorySlot);
+            // 喵~防御：映射失败时跳过，不让异常槽位影响整页渲染。
+            if (displaySlot < 0) {
+                continue;
+            }
             // 读取玩家当前槽位并克隆，禁止 GUI 与实际背包共享 ItemStack 引用。
             ItemStack playerItem = player.getInventory().getItem(inventorySlot);
             // 获取当前四态权限用于渲染。
