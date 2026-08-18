@@ -34,7 +34,7 @@ public class DepositService {
     }
 
     /** 容器处理结果，用于将提交失败安全传播到预算外层 */
-    private enum ContainerOutcome {
+    enum ContainerOutcome {
         /** 当前容器可继续处理 */
         CONTINUE,
         /** 当前容器已恢复异常状态，应跳到下一个容器 */
@@ -311,6 +311,8 @@ public class DepositService {
                     if (result.status() == CrossStorageMutationCoordinator.Status.SUCCESS) {
                         // 统计双域实际移动数量喵~
                         stats.itemsMoved += result.movedAmount();
+                        // 成功写入目标容器后按规范身份去重计入完成消息喵~
+                        stats.markContainerUsed(identity);
                         // 当前逻辑槽位已由 context snapshot 推进喵~
                         backpackItem = ContainerTransaction.cloneOrNull(context.snapshot().itemAt(logicalSlot));
                         // 来源耗尽则转到下一个逻辑槽位喵~
@@ -389,7 +391,9 @@ public class DepositService {
             if (phase == Phase.FILL_EXISTING) {
                 transferOutcome = depositToExistingStacks(player, containerInventory, playerSlot, playerItem, stats);
             } else if (containerHasSimilar(containerInventory, playerItem)) {
-                transferOutcome = depositToEmptySlots(player, containerInventory, playerSlot, playerItem, stats);
+                // 第二阶段统一先合并再使用空槽，避免零散来源拆散同类堆叠喵~
+                transferOutcome = depositInUseEmptyPhase(
+                        player, containerInventory, playerSlot, playerItem, stats);
             } else {
                 transferOutcome = ContainerOutcome.CONTINUE;
             }
@@ -400,20 +404,58 @@ public class DepositService {
         }
 
         if (stats.itemsMoved > itemsBeforeThisContainer) {
-            stats.containersUsed++;
+            // 原版成功写入与 PlayerBackpack 成功写入共用去重统计喵~
+            stats.markContainerUsed(identity);
         }
         return ContainerOutcome.CONTINUE;
     }
 
     /**
-     * 向容器已有非满相似堆叠中填充物品
+     * 在第二阶段先合并已有和本阶段创建的同类堆叠，再在来源仍有剩余时使用空槽。
      *
-     * @param player          玩家
-     * @param containerInv    容器库存
-     * @param playerSlot      玩家槽位
-     * @param playerItem      玩家物品快照（仅用于 isSimilar 比较）
-     * @param stats           统计数据
-     * @return 当前容器处理结果
+     * @param player 执行存入的玩家。
+     * @param containerInventory 当前已验证的目标容器库存。
+     * @param playerSlot 玩家来源槽位。
+     * @param playerItem 当前来源物品的比较快照。
+     * @param stats 当前任务累计统计。
+     * @return 本容器继续、跳过或中止状态。
+     */
+    ContainerOutcome depositInUseEmptyPhase(Player player, Inventory containerInventory,
+                                            int playerSlot, ItemStack playerItem, DepositStats stats) {
+        // 喵~防御：容器已无相似物品时不得因本阶段创建新堆叠，保留空箱子不能接收物品语义喵~
+        if (!containerHasSimilar(containerInventory, playerItem)) {
+            // 不满足实时相似资格时不触碰来源或目标库存喵~
+            return ContainerOutcome.CONTINUE;
+        }
+        // 先填充已有及本阶段刚创建的同类未满堆叠，避免来源零散时拆分为多个小堆叠喵~
+        ContainerOutcome existingStacksOutcome =
+                depositToExistingStacks(player, containerInventory, playerSlot, playerItem, stats);
+        // 非继续结果必须原样传播，避免恢复失败被空槽路径掩盖喵~
+        if (existingStacksOutcome != ContainerOutcome.CONTINUE) {
+            // 返回事务层决定的安全控制流喵~
+            return existingStacksOutcome;
+        }
+        // 读取合并后的实时来源槽位，判断是否还需要占用目标空槽喵~
+        ItemStack remainingPlayerItem =
+                ContainerTransaction.cloneOrNull(player.getInventory().getItem(playerSlot));
+        // 来源已耗尽时无需再扫描空槽喵~
+        if (remainingPlayerItem == null) {
+            // 当前来源已经完整存入容器喵~
+            return ContainerOutcome.CONTINUE;
+        }
+        // 将剩余物品放入空槽，保持原有候选资格限制喵~
+        return depositToEmptySlots(player, containerInventory, playerSlot, playerItem, stats);
+    }
+
+    /**
+     * 向容器已有非满相似堆叠中填充物品。
+     *
+     * @param player 执行存入的玩家。
+     * @param containerInv 当前已验证的目标容器库存。
+     * @param playerSlot 玩家来源槽位。
+     * @param playerItem 来源物品的比较快照。
+     * @param stats 当前任务累计统计。
+     * @return 本容器继续、跳过或中止状态。
      */
     private ContainerOutcome depositToExistingStacks(Player player, Inventory containerInv,
                                                      int playerSlot, ItemStack playerItem, DepositStats stats) {
@@ -514,12 +556,32 @@ public class DepositService {
 
     /** 存入统计数据，可变，在主线程内逐步更新 */
     public static class DepositStats {
+        /** 已成功写入的容器规范键集合，用于跨阶段和跨域去重。 */
+        private final Set<String> usedContainerKeys = new HashSet<>();
         /** 成功移动的物品总数 */
         public int itemsMoved;
-        /** 实际参与的容器数（每次成功写入后累加）*/
+        /** 实际参与的容器数（每个容器在本任务中最多计一次） */
         public int containersUsed;
         /** 跳过的容器数 */
         public int skipped;
+
+        /**
+         * 将成功写入的容器记入统计，重复写入同一规范容器不重复计数。
+         *
+         * @param identity 已成功接收物品的容器身份。
+         */
+        void markContainerUsed(ContainerIdentity identity) {
+            // 喵~防御：缺少容器身份时不能安全生成去重键，保守不增加统计喵~
+            if (identity == null) {
+                // 空身份不计入完成消息，避免虚增容器数喵~
+                return;
+            }
+            // 首次写入该规范容器时才增加公开容器计数喵~
+            if (usedContainerKeys.add(identity.canonicalKey())) {
+                // 记录本任务实际使用过的独立容器数量喵~
+                containersUsed++;
+            }
+        }
     }
 
     /** 存入操作完成回调接口 */
