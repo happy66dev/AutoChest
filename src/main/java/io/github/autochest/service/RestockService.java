@@ -268,17 +268,9 @@ public class RestockService {
         }
 
         // 所有原版目标槽位处理完毕后，按逻辑槽位升序处理 PlayerBackpack 容量内目标喵~
-        ContainerOutcome backpackOutcome = processPlayerBackpackTargets(
-                identities, playerTask, stats);
-        // 喵~防御：跨域不确定失败必须取消整个任务喵~
-        if (backpackOutcome == ContainerOutcome.ABORT_TASK) {
-            // 交给命令层统一释放 AutoChest 和 PlayerBackpack 会话喵~
-            onDone.onCancelled();
-            // 不报告普通完成喵~
-            return;
-        }
-        // 所有槽位处理完毕
-        onDone.onComplete(stats);
+        processPlayerBackpackTargets(identities, playerTask, stats, onDone);
+        // PlayerBackpack 分支自行在完成或取消时调用回调喵~
+        return;
     }
 
     /**
@@ -338,112 +330,242 @@ public class RestockService {
 
 
     // 处理 PlayerBackpack 容量内已有非满目标，排除空槽、满槽和 overflow 喵~
-    private ContainerOutcome processPlayerBackpackTargets(List<ContainerIdentity> identities,
-                                                          PlayerTask playerTask,
-                                                          RestockStats stats) {
-        // 无跨域依赖时保持原版补货流程喵~
+    private void processPlayerBackpackTargets(List<ContainerIdentity> identities,
+                                              PlayerTask playerTask,
+                                              RestockStats stats,
+                                              RestockCallback onDone) {
+        // 喵~防御：缺少跨域依赖时不读取或写入 PlayerBackpack 喵~
         if (crossStorageCoordinator == null || playerBackpackTaskContexts == null) {
-            // 没有 PlayerBackpack 目标可处理喵~
-            return ContainerOutcome.CONTINUE;
+            // 原版目标已完成，直接报告结果喵~
+            onDone.onComplete(stats);
+            return;
         }
         // 获取当前玩家唯一外部操作会话喵~
         PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(playerTask.getPlayerUuid());
-        // 会话缺失时不猜测背包目标状态喵~
+        // 会话缺失或关闭时不猜测背包目标状态喵~
         if (context == null || !context.isOpen()) {
-            // 原版目标已安全完成喵~
-            return ContainerOutcome.CONTINUE;
+            // 交给统一完成出口报告结果喵~
+            onDone.onComplete(stats);
+            return;
         }
-        // 获取容量边界内的逻辑槽位，并按升序处理喵~
+        // 从开始快照建立稳定逻辑槽位列表喵~
         List<Integer> logicalSlots = new ArrayList<>();
+        // 按快照顺序读取所有逻辑槽位喵~
         for (Integer logicalSlot : context.snapshot().items().navigableKeySet()) {
-            // 喵~防御：只允许容量内正数逻辑槽位，排除 overflow 喵~
+            // 喵~防御：拒绝非法和容量外槽位喵~
             if (logicalSlot != null && logicalSlot > 0 && logicalSlot <= context.snapshot().capacity()) {
-                // 加入稳定升序目标列表喵~
+                // 保存合法目标槽位喵~
                 logicalSlots.add(logicalSlot);
             }
         }
-        // 逐个 PlayerBackpack 目标槽位处理喵~
-        for (int logicalSlot : logicalSlots) {
-            // 读取任务期间最新目标物品喵~
+        // 从第一个目标、容器和容器槽位开始分 tick 执行喵~
+        processPlayerBackpackTargetCursor(identities, playerTask, stats, logicalSlots,
+                0, 0, 0, onDone);
+    }
+
+    // 以可恢复 cursor 执行 PlayerBackpack 补货，完整 mutation 不跨 tick 喵~
+    private void processPlayerBackpackTargetCursor(List<ContainerIdentity> identities,
+                                                    PlayerTask playerTask,
+                                                    RestockStats stats,
+                                                    List<Integer> logicalSlots,
+                                                    int logicalSlotIndex,
+                                                    int containerIndex,
+                                                    int containerSlotIndex,
+                                                    RestockCallback onDone) {
+        // 重新获取玩家，禁止跨 tick 保存 Bukkit 引用喵~
+        Player player = Bukkit.getPlayer(playerTask.getPlayerUuid());
+        // 喵~防御：玩家离线、死亡、换世界或任务失效时立即取消喵~
+        if (!registry.isValid(playerTask) || player == null || !player.isOnline() || player.isDead()
+                || !player.getWorld().getUID().equals(playerTask.getWorldUuid())) {
+            // 交给命令层释放会话喵~
+            onDone.onCancelled();
+            return;
+        }
+        // 每个 tick 读取最新 PlayerBackpack 上下文喵~
+        PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(playerTask.getPlayerUuid());
+        // 上下文关闭后停止新的跨域提交喵~
+        if (context == null || !context.isOpen()) {
+            // 无法确认状态时保守取消任务喵~
+            onDone.onCancelled();
+            return;
+        }
+        // 读取并归一化当前 tick 操作预算喵~
+        int operationsPerTick = Math.max(1, playerTask.getConfigSnapshot().getSubmitContainersPerTick());
+        // 读取并归一化当前 tick 纳秒预算喵~
+        long nanosPerTick = Math.max(1L, playerTask.getConfigSnapshot().getSubmitNanosPerTick());
+        // 创建当前 tick 的预算起点喵~
+        SubmissionBudget budget = new SubmissionBudget(operationsPerTick, nanosPerTick, System.nanoTime());
+        // 使用局部 cursor 变量推进本 tick 工作喵~
+        int currentLogicalSlotIndex = logicalSlotIndex;
+        // 使用局部容器 cursor 变量推进本 tick 工作喵~
+        int currentContainerIndex = containerIndex;
+        // 使用局部容器槽位 cursor 变量推进本 tick 工作喵~
+        int currentContainerSlotIndex = containerSlotIndex;
+        // 遍历所有目标逻辑槽位喵~
+        while (currentLogicalSlotIndex < logicalSlots.size()) {
+            // 读取最新目标快照，避免跨 tick 使用旧 ItemStack 喵~
+            int logicalSlot = logicalSlots.get(currentLogicalSlotIndex);
+            // 克隆当前目标物品喵~
             ItemStack targetItem = ContainerTransaction.cloneOrNull(context.snapshot().itemAt(logicalSlot));
-            // 空槽和已满堆叠不属于补货目标喵~
+            // 喵~防御：空目标和已满目标不创建新物品喵~
             if (targetItem == null || targetItem.getAmount() >= targetItem.getMaxStackSize()) {
+                // 推进目标并重置容器 cursor 喵~
+                currentLogicalSlotIndex++;
+                currentContainerIndex = 0;
+                currentContainerSlotIndex = 0;
                 continue;
             }
-            // 逐个容器按规划顺序寻找来源喵~
-            for (ContainerIdentity identity : identities) {
-                // 重新验证容器、玩家与 Hook 喵~
-                ContainerTransaction.ValidationResult validation = transaction.validate(playerTask, identity);
-                // Hook 运行期不可用时中止整个任务喵~
+            // 遍历候选容器喵~
+            while (currentContainerIndex < identities.size()) {
+                // 喵~防御：预算耗尽时保存安全 cursor 喵~
+                if (budget.exhausted(System.nanoTime())) {
+                    // 下一 tick 重新验证后继续喵~
+                    schedulePlayerBackpackTargetContinuation(identities, playerTask, stats, logicalSlots,
+                            currentLogicalSlotIndex, currentContainerIndex, currentContainerSlotIndex, onDone);
+                    return;
+                }
+                // 验证容器和 Hook 喵~
+                ContainerTransaction.ValidationResult validation = transaction.validate(
+                        playerTask, identities.get(currentContainerIndex));
+                // Hook 不可用时立即取消喵~
                 if (validation.failureResult == ContainerTransaction.Result.FAILED_HOOK_UNAVAILABLE) {
-                    // 返回不可恢复状态喵~
-                    return ContainerOutcome.ABORT_TASK;
+                    // 释放任务会话喵~
+                    onDone.onCancelled();
+                    return;
                 }
                 // 失效容器跳过喵~
                 if (!validation.isValid()) {
+                    // 推进容器并重置槽位喵~
+                    currentContainerIndex++;
+                    currentContainerSlotIndex = 0;
                     continue;
                 }
-                // 遍历容器来源槽位升序处理喵~
+                // 读取本次已验证容器库存喵~
                 Inventory inventory = validation.inventory;
-                for (int containerSlot = 0; containerSlot < inventory.getSize(); containerSlot++) {
-                    // 读取容器实时来源物品喵~
-                    ItemStack sourceItem = ContainerTransaction.cloneOrNull(inventory.getItem(containerSlot));
-                    // 仅处理与任务目标相似的来源喵~
+                // 扫描容器槽位喵~
+                while (currentContainerSlotIndex < inventory.getSize()) {
+                    // 每个槽位边界检查纳秒预算喵~
+                    if (budget.exhausted(System.nanoTime())) {
+                        // 从当前槽位保存 cursor 喵~
+                        schedulePlayerBackpackTargetContinuation(identities, playerTask, stats, logicalSlots,
+                                currentLogicalSlotIndex, currentContainerIndex, currentContainerSlotIndex, onDone);
+                        return;
+                    }
+                    // 读取来源槽位镜像喵~
+                    ItemStack sourceItem = ContainerTransaction.cloneOrNull(
+                            inventory.getItem(currentContainerSlotIndex));
+                    // 空槽或不同物品不能补货喵~
                     if (sourceItem == null || !sourceItem.isSimilar(targetItem)) {
+                        // 推进来源槽位喵~
+                        currentContainerSlotIndex++;
                         continue;
                     }
-                    // 计算目标还需要与来源可提供的数量喵~
+                    // 计算目标剩余容量喵~
                     int needed = targetItem.getMaxStackSize() - targetItem.getAmount();
-                    // 取两端可移动数量的较小值喵~
+                    // 计算本次移动数量喵~
                     int amount = Math.min(needed, sourceItem.getAmount());
-                    // 喵~防御：数量无效时不创建跨域请求喵~
+                    // 喵~防御：数量非法时跳过来源槽位喵~
                     if (amount <= 0) {
+                        // 推进来源槽位喵~
+                        currentContainerSlotIndex++;
                         continue;
                     }
-                    // 提交 Bukkit 到 PlayerBackpack 的跨域 mutation 喵~
+                    // 执行完整跨域 mutation，不在内部让出 tick 喵~
                     CrossStorageMutationCoordinator.Result result = crossStorageCoordinator.restock(
-                            context, inventory, containerSlot, logicalSlot, amount);
-                    // 成功后更新统计和目标快照喵~
+                            context, inventory, currentContainerSlotIndex, logicalSlot, amount);
+                    // 完整 mutation 完成后才计入操作预算喵~
+                    budget.markOperation();
+                    // 成功后刷新目标镜像和统计喵~
                     if (result.status() == CrossStorageMutationCoordinator.Status.SUCCESS) {
-                        // 统计实际移动数量喵~
+                        // 统计协调器确认的实际移动数量喵~
                         stats.itemsMoved += result.movedAmount();
-                        // 获取 provider 返回的最新目标镜像喵~
+                        // 当前容器实际参与补货，统计容器使用次数喵~
+                        if (result.movedAmount() > 0) {
+                            // 按规范身份统计实际参与容器，避免 PB 多次写入重复计数喵~
+                            stats.markContainerUsed(identities.get(currentContainerIndex));
+                        }
+                        // 读取 provider 返回后的最新目标喵~
                         targetItem = ContainerTransaction.cloneOrNull(context.snapshot().itemAt(logicalSlot));
-                        // 目标已满则转到下一个逻辑槽位喵~
+                        // 目标满后进入下一个逻辑槽位喵~
                         if (targetItem == null || targetItem.getAmount() >= targetItem.getMaxStackSize()) {
+                            // 推进目标并重置 cursor 喵~
+                            currentLogicalSlotIndex++;
+                            currentContainerIndex = 0;
+                            currentContainerSlotIndex = 0;
                             break;
                         }
-                        // 继续从当前容器寻找同类来源喵~
+                        // 目标未满，重新检查当前来源槽位喵~
                         continue;
                     }
-                    // 已恢复结果跳过当前容器喵~
+                    // 已恢复时跳过当前容器喵~
                     if (result.status() == CrossStorageMutationCoordinator.Status.RECOVERED) {
+                        // 记录跳过并推进容器喵~
                         stats.skipped++;
+                        currentContainerIndex++;
+                        currentContainerSlotIndex = 0;
                         break;
                     }
-                    // 不确定状态立即取消任务喵~
+                    // 不可恢复状态立即取消任务喵~
                     if (result.status() == CrossStorageMutationCoordinator.Status.FAILED_UNRECOVERABLE) {
-                        // 返回不可恢复状态喵~
-                        return ContainerOutcome.ABORT_TASK;
+                        // 保守停止后续 mutation 喵~
+                        onDone.onCancelled();
+                        return;
                     }
+                    // 未提交结果推进槽位，等待后续候选喵~
+                    currentContainerSlotIndex++;
                 }
-                // 当前目标已满时跳到下一个逻辑槽位喵~
-                if (targetItem == null || targetItem.getAmount() >= targetItem.getMaxStackSize()) {
-                    break;
+                // 当前容器扫描结束后推进容器喵~
+                if (currentLogicalSlotIndex >= logicalSlots.size()
+                        || currentContainerSlotIndex >= inventory.getSize()) {
+                    // 重置槽位并推进容器喵~
+                    currentContainerIndex++;
+                    currentContainerSlotIndex = 0;
                 }
             }
+            // 所有容器均无法补货时推进目标喵~
+            currentLogicalSlotIndex++;
+            currentContainerIndex = 0;
+            currentContainerSlotIndex = 0;
         }
-        // PlayerBackpack 目标处理完成喵~
-        return ContainerOutcome.CONTINUE;
+        // 全部 PlayerBackpack 目标处理完毕喵~
+        onDone.onComplete(stats);
+    }
+
+    // 调度下一 tick 继续 PlayerBackpack 补货，并重新创建预算喵~
+    private void schedulePlayerBackpackTargetContinuation(List<ContainerIdentity> identities,
+                                                          PlayerTask playerTask,
+                                                          RestockStats stats,
+                                                          List<Integer> logicalSlots,
+                                                          int logicalSlotIndex,
+                                                          int containerIndex,
+                                                          int containerSlotIndex,
+                                                          RestockCallback onDone) {
+        // 只在 Bukkit 主线程调度下一次 cursor 喵~
+        Bukkit.getScheduler().runTask(plugin, () -> processPlayerBackpackTargetCursor(identities, playerTask,
+                stats, logicalSlots, logicalSlotIndex, containerIndex, containerSlotIndex, onDone));
     }
 
     public static class RestockStats {
         /** 成功补充的物品总数 */
         public int itemsMoved;
+        // 当前任务中成功使用过的容器规范键，避免 PB 多次 mutation 重复统计喵~
+        private final Set<String> usedContainerKeys = new HashSet<>();
         /** 实际参与的容器数 */
         public int containersUsed;
-        /** 跳过的容器数 */
+        /** 已跳过的容器数 */
         public int skipped;
+
+        // 成功使用容器时按 canonical key 去重统计喵~
+        private void markContainerUsed(ContainerIdentity identity) {
+            // 喵~防御：容器身份为空时无法安全统计喵~
+            if (identity == null) {
+                return;
+            }
+            // 只有首次成功写入该容器才增加统计喵~
+            if (usedContainerKeys.add(identity.canonicalKey())) {
+                containersUsed++;
+            }
+        }
     }
 
     /** 补货操作完成回调接口 */

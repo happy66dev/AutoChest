@@ -150,6 +150,12 @@ public final class CrossStorageMutationCoordinator {
             return compensateAppliedMutation(context, mutationId, logicalSlot, sourceAfter, sourceBefore,
                     amount, mutationResult.newRevision(), BackpackMutationDirection.DEPOSIT);
         }
+        // provider apply 期间容器可能被事件或其他玩家修改，写入前必须重新比对 before-image 喵~
+        if (!sameSlot(containerInventory.getItem(containerSlot), targetBefore)) {
+            // 喵~防御：拒绝覆盖外部修改，保留 journal 并停止任务喵~
+            logger.severe("[AutoChest] deposit 写入前容器槽位已变化，必须人工 reconcile: mutation=" + mutationId);
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
         try {
             // 写入容器目标的独立副本喵~
             containerInventory.setItem(containerSlot, targetAfter.clone());
@@ -259,6 +265,12 @@ public final class CrossStorageMutationCoordinator {
             return compensateAppliedMutation(context, mutationId, logicalSlot, targetAfter, targetBefore,
                     amount, mutationResult.newRevision(), BackpackMutationDirection.RESTOCK);
         }
+        // provider apply 期间容器可能被外部修改，restock 写入前必须重新比对来源 before-image 喵~
+        if (!sameSlot(containerInventory.getItem(containerSlot), sourceBefore)) {
+            // 喵~防御：拒绝覆盖外部修改，保留 journal 并停止任务喵~
+            logger.severe("[AutoChest] restock 写入前容器槽位已变化，必须人工 reconcile: mutation=" + mutationId);
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
         try {
             // source-first 写入 Bukkit 容器来源 after-image 喵~
             containerInventory.setItem(containerSlot, ContainerTransaction.cloneOrNull(sourceAfter));
@@ -361,8 +373,19 @@ public final class CrossStorageMutationCoordinator {
             // 返回不可恢复状态喵~
             return new Result(Status.FAILED_UNRECOVERABLE, 0);
         }
+        // 记录恢复后的容器镜像喵~
+        ItemStack restoredBukkitItem;
+        try {
+            // 读取恢复后的容器槽位喵~
+            restoredBukkitItem = ContainerTransaction.cloneOrNull(inventory.getItem(bukkitSlot));
+        } catch (RuntimeException readException) {
+            // 喵~防御：恢复后无法读取槽位时状态不确定，禁止继续补偿喵~
+            logger.log(Level.SEVERE, "[AutoChest] 跨域恢复后无法读取 Bukkit 槽位，必须人工 reconcile: mutation="
+                    + originalMutationId, readException);
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
         // 精确复核容器已回到事务 before-image 喵~
-        if (!sameSlot(inventory.getItem(bukkitSlot), bukkitBefore)) {
+        if (!sameSlot(restoredBukkitItem, bukkitBefore)) {
             // 喵~防御：恢复后镜像不一致时禁止声明补偿成功喵~
             logger.log(Level.SEVERE, "[AutoChest] 跨域失败后 Bukkit before-image 复核失败，必须人工 reconcile: mutation="
                     + originalMutationId + " logicalSlot=" + logicalSlot);
@@ -375,11 +398,20 @@ public final class CrossStorageMutationCoordinator {
         BackpackMutationRequest compensationRequest = new BackpackMutationRequest(
                 compensationMutationId, context.operation().targetId(), originalDirection,
                 context.snapshot().revision(), logicalSlot, backpackAfter, backpackBefore, amount);
-        // 在容器已精确恢复后执行 journal-backed 条件补偿，避免产生新的重复物品喵~
-        BackpackMutationResult compensationResult = context.adapter().applyCompensation(
-                context.operation(), originalMutationId, compensationRequest);
+        // 喵~防御：补偿接口异常也必须转成不可恢复结果，不能逃逸任务清理出口喵~
+        BackpackMutationResult compensationResult;
+        try {
+            // 在容器已精确恢复后执行 journal-backed 条件补偿喵~
+            compensationResult = context.adapter().applyCompensation(
+                    context.operation(), originalMutationId, compensationRequest);
+        } catch (RuntimeException compensationException) {
+            // 记录补偿异常并保留 journal 现场喵~
+            logger.log(Level.SEVERE, "[AutoChest] 跨域 PlayerBackpack 条件补偿异常，必须人工 reconcile: mutation="
+                    + originalMutationId, compensationException);
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
         // 只有已提交或幂等重放且快照存在并严格推进上下文时才确认完全恢复喵~
-        if (compensationResult.applied() && compensationResult.snapshot() != null
+        if (compensationResult != null && compensationResult.applied() && compensationResult.snapshot() != null
                 && context.advance(compensationResult.snapshot())) {
             // 两侧均回到 before-image，报告已恢复且不计入成功搬运喵~
             return new Result(Status.RECOVERED, 0);
@@ -415,10 +447,17 @@ public final class CrossStorageMutationCoordinator {
 
     private boolean isValidRequest(PlayerBackpackTaskContext context, Inventory inventory,
                                    int bukkitSlot, int logicalSlot, int amount) {
+        // 喵~防御：上下文为空或已关闭时不能读取快照喵~
+        if (context == null || !context.isOpen()) {
+            // 返回未提交结果喵~
+            return false;
+        }
+        // 读取当前任务快照容量，拒绝容量外 logical slot 喵~
+        BackpackSnapshot snapshot = context.snapshot();
         // 只有会话仍打开、库存非空且槽位数量合法时才允许跨域 mutation 喵~
-        return context != null && context.isOpen() && inventory != null
+        return snapshot != null && inventory != null
                 && bukkitSlot >= 0 && bukkitSlot < inventory.getSize()
-                && logicalSlot > 0 && amount > 0;
+                && logicalSlot > 0 && logicalSlot <= snapshot.capacity() && amount > 0;
     }
 
     // 验证来源到目标可按给定数量移动喵~
