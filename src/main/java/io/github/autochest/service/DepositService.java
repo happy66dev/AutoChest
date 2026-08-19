@@ -187,8 +187,8 @@ public class DepositService {
             Runnable onPhoneDone,
             DepositCallback onDone
     ) {
-        int containersPerTick = playerTask.getConfigSnapshot().getSubmitContainersPerTick();
-        long nanosPerTick = playerTask.getConfigSnapshot().getSubmitNanosPerTick();
+        int containersPerTick = Math.max(1, playerTask.getConfigSnapshot().getSubmitContainersPerTick());
+        long nanosPerTick = Math.max(1L, playerTask.getConfigSnapshot().getSubmitNanosPerTick());
         long tickStart = System.nanoTime();
         int processed = 0;
         int i = startIndex;
