@@ -326,8 +326,9 @@ public final class CrossStorageMutationCoordinator {
         // 调用带 journal 的条件补偿接口喵~
         BackpackMutationResult compensationResult = context.adapter().applyCompensation(
                 context.operation(), mutationId, compensationRequest);
-        // 补偿成功但 snapshot 无法推进时仍不能声明已恢复喵~
-        if (compensationResult.applied() && compensationResult.snapshot() != null
+        // 只有补偿精确移动本次数量、快照存在且上下文严格推进时才确认恢复喵~
+        if (compensationResult != null && compensationResult.applied()
+                && compensationResult.movedAmount() == amount && compensationResult.snapshot() != null
                 && context.advance(compensationResult.snapshot())) {
             // 返回已恢复且不产生移动统计喵~
             return new Result(Status.RECOVERED, 0);
