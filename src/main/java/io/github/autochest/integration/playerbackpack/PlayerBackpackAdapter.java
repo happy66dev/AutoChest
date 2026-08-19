@@ -15,6 +15,10 @@ public final class PlayerBackpackAdapter {
     private final Object api;
     private final ClassLoader apiClassLoader;
     private final Logger logger;
+    // 缓存稳定 API 方法，避免每次跨域 mutation 重新扫描反射元数据喵~
+    private final Map<String, Method> apiMethods;
+    // 缓存 API DTO 构造器，减少高频跨域提交的反射查找喵~
+    private final Map<String, Constructor<?>> apiConstructors;
 
     public PlayerBackpackAdapter(Object api, Logger logger) {
         if (api == null || logger == null) {
@@ -23,6 +27,10 @@ public final class PlayerBackpackAdapter {
         this.api = api;
         this.apiClassLoader = api.getClass().getClassLoader();
         this.logger = logger;
+        // 初始化可变缓存，缺失方法仍由 invoke 抛出明确异常喵~
+        this.apiMethods = new java.util.HashMap<>();
+        // 初始化 DTO 构造器缓存，首次调用时按类名和签名填充喵~
+        this.apiConstructors = new java.util.HashMap<>();
     }
 
     public Optional<BackpackSnapshot> loadSnapshot(UUID targetId) {
@@ -154,33 +162,79 @@ public final class PlayerBackpackAdapter {
     }
 
     private Object invoke(String methodName, Object... arguments) throws ReflectiveOperationException {
-        Class<?> apiInterface = Class.forName("com.playerbackpack.api.PlayerBackpackApi", false, apiClassLoader);
-        for (Method method : apiInterface.getMethods()) {
-            if (method.getName().equals(methodName) && method.getParameterCount() == arguments.length) {
-                return method.invoke(api, arguments);
+        // 优先使用缓存方法，避免每次调用重复遍历 API 方法列表喵~
+        Method cachedMethod = apiMethods.get(methodName + "#" + arguments.length);
+        // 首次调用时加载 API 接口并查找精确参数数量的方法喵~
+        if (cachedMethod == null) {
+            // 仅在首次调用加载 API 类型，保持缺少 API 时安全失败喵~
+            Class<?> apiInterface = Class.forName("com.playerbackpack.api.PlayerBackpackApi", false, apiClassLoader);
+            // 遍历公开方法并缓存匹配项喵~
+            for (Method method : apiInterface.getMethods()) {
+                // 方法名和参数数量共同确定当前桥接入口喵~
+                if (method.getName().equals(methodName) && method.getParameterCount() == arguments.length) {
+                    // 缓存当前方法供后续调用复用喵~
+                    cachedMethod = method;
+                    apiMethods.put(methodName + "#" + arguments.length, method);
+                    break;
+                }
             }
         }
-        throw new NoSuchMethodException(methodName);
+        // 喵~防御：API 缺少指定方法时保持明确异常和原有降级行为喵~
+        if (cachedMethod == null) {
+            // 抛出反射方法不存在异常喵~
+            throw new NoSuchMethodException(methodName);
+        }
+        // 调用缓存方法并返回 provider 原始结果喵~
+        return cachedMethod.invoke(api, arguments);
     }
 
     private Object toNativeRequest(BackpackMutationRequest request) throws ReflectiveOperationException {
         Class<?> requestClass = load("BackpackMutationRequest");
         Class<?> directionClass = load("BackpackMutationDirection");
         Object direction = Enum.valueOf(directionClass.asSubclass(Enum.class), request.direction().name());
-        Constructor<?> constructor = requestClass.getConstructor(UUID.class, UUID.class, directionClass, long.class,
-                int.class, ItemStack.class, ItemStack.class, int.class);
+        // 生成稳定构造器缓存键，避免重复反射查找喵~
+        String constructorKey = requestClass.getName() + "#request";
+        // 从缓存读取请求 DTO 构造器喵~
+        Constructor<?> constructor = apiConstructors.get(constructorKey);
+        // 首次调用时按精确签名查找并缓存构造器喵~
+        if (constructor == null) {
+            constructor = requestClass.getConstructor(UUID.class, UUID.class, directionClass, long.class,
+                    int.class, ItemStack.class, ItemStack.class, int.class);
+            apiConstructors.put(constructorKey, constructor);
+        }
+        // 用缓存构造器生成 provider 请求 DTO 喵~
         return constructor.newInstance(request.mutationId(), request.targetId(), direction, request.expectedRevision(),
                 request.logicalSlot(), request.expectedBefore(), request.requestedAfter(), request.movedAmount());
     }
 
     private Object toNativeContainerMutation(BackpackContainerMutation mutation) throws ReflectiveOperationException {
+        // 加载容器描述 DTO 类型喵~
         Class<?> descriptorClass = load("BackpackContainerDescriptor");
-        Constructor<?> descriptorConstructor = descriptorClass.getConstructor(UUID.class, int.class, int.class, int.class, int.class);
+        // 生成稳定构造器缓存键，避免重复反射查找喵~
+        String descriptorConstructorKey = descriptorClass.getName() + "#descriptor";
+        // 从缓存读取容器描述构造器喵~
+        Constructor<?> descriptorConstructor = apiConstructors.get(descriptorConstructorKey);
+        // 首次调用时按精确签名查找并缓存构造器喵~
+        if (descriptorConstructor == null) {
+            descriptorConstructor = descriptorClass.getConstructor(UUID.class, int.class, int.class, int.class, int.class);
+            apiConstructors.put(descriptorConstructorKey, descriptorConstructor);
+        }
+        // 使用缓存构造器生成 provider 容器描述喵~
         BackpackContainerDescriptor descriptor = mutation.descriptor();
         Object nativeDescriptor = descriptorConstructor.newInstance(descriptor.worldId(), descriptor.x(), descriptor.y(),
                 descriptor.z(), descriptor.slot());
+        // 加载容器 mutation DTO 类型喵~
         Class<?> mutationClass = load("BackpackContainerMutation");
-        Constructor<?> mutationConstructor = mutationClass.getConstructor(descriptorClass, ItemStack.class, ItemStack.class);
+        // 生成稳定构造器缓存键喵~
+        String mutationConstructorKey = mutationClass.getName() + "#mutation";
+        // 从缓存读取容器 mutation 构造器喵~
+        Constructor<?> mutationConstructor = apiConstructors.get(mutationConstructorKey);
+        // 首次调用时查找并缓存容器 mutation 构造器喵~
+        if (mutationConstructor == null) {
+            mutationConstructor = mutationClass.getConstructor(descriptorClass, ItemStack.class, ItemStack.class);
+            apiConstructors.put(mutationConstructorKey, mutationConstructor);
+        }
+        // 使用缓存构造器生成 provider mutation DTO 喵~
         return mutationConstructor.newInstance(nativeDescriptor, mutation.expectedBefore(), mutation.requestedAfter());
     }
 

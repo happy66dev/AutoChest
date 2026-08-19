@@ -110,6 +110,11 @@ public final class CrossStorageMutationCoordinator {
         }
         // 先 durable 写入双域完整 before/after intent，崩溃后由 PlayerBackpack 启动恢复隔离喵~
         BackpackMutationResult preparationResult = context.adapter().prepareMutation(context.operation(), request, containerMutation);
+        // 喵~防御：准备阶段空结果代表 journal 状态未知，禁止继续提交喵~
+        if (preparationResult == null) {
+            // 返回不可恢复并保留 provider 侧审计现场喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
         // 只有成功准备或完全相同的幂等重放才能修改 PlayerBackpack 喵~
         if (!preparationResult.applied()) {
             // 保持两侧物品不变喵~
@@ -117,11 +122,33 @@ public final class CrossStorageMutationCoordinator {
         }
         // 先持久化 PlayerBackpack 来源扣除，杜绝 SQLite 失败导致容器复制喵~
         BackpackMutationResult mutationResult = context.adapter().applyMutation(context.operation(), request);
-        // 仅已提交或幂等重放结果才允许写 Bukkit 容器喵~
-        if (!mutationResult.applied() || mutationResult.snapshot() == null
-                || !context.advance(mutationResult.snapshot())) {
+        // apply 未确认时先区分明确未提交与状态不确定喵~
+        if (mutationResult == null) {
+            // 喵~防御：provider 返回空结果无法判断是否已提交，必须停止任务喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
+        // 明确需要 reconcile 的 provider 结果不能静默跳过喵~
+        if (mutationResult.status() == BackpackMutationResult.Status.RECONCILIATION_REQUIRED) {
+            // 保留 provider journal 并阻止后续猜测性写入喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
+        // 明确未应用的服务失败或 CAS 冲突可以安全跳过喵~
+        if (!mutationResult.applied()) {
             // 冲突或存储失败时保持容器不变喵~
             return skipped();
+        }
+        // apply 成功必须精确移动请求数量，否则双方状态无法按本事务镜像解释喵~
+        if (mutationResult.movedAmount() != amount) {
+            // 喵~防御：部分成功或零移动均视为不可恢复，禁止按请求数量写入另一域喵~
+            logger.severe("[AutoChest] PlayerBackpack mutation 数量不匹配，必须人工 reconcile: mutation="
+                    + mutationId);
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
+        // 喵~防御：applyMutation 已成功但 snapshot null 或 advance 失败时，背包已扣除但容器未写，必须补偿喵~
+        if (mutationResult.snapshot() == null || !context.advance(mutationResult.snapshot())) {
+            // 尝试以 sourceAfter 作为新 before-image 恢复到原始 sourceBefore 喵~
+            return compensateAppliedMutation(context, mutationId, logicalSlot, sourceAfter, sourceBefore,
+                    amount, mutationResult.newRevision(), BackpackMutationDirection.DEPOSIT);
         }
         try {
             // 写入容器目标的独立副本喵~
@@ -192,6 +219,11 @@ public final class CrossStorageMutationCoordinator {
         }
         // 先 durable 写入双域完整 before/after intent，崩溃后由 PlayerBackpack 启动恢复隔离喵~
         BackpackMutationResult preparationResult = context.adapter().prepareMutation(context.operation(), request, containerMutation);
+        // 喵~防御：准备阶段空结果代表 journal 状态未知，禁止继续提交喵~
+        if (preparationResult == null) {
+            // 返回不可恢复并保留 provider 侧审计现场喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
         // 只有成功准备或完全相同的幂等重放才能修改 PlayerBackpack 喵~
         if (!preparationResult.applied()) {
             // 保持两侧物品不变喵~
@@ -199,11 +231,33 @@ public final class CrossStorageMutationCoordinator {
         }
         // 先持久化 PlayerBackpack 目标增加，随后才扣减 Bukkit 容器来源喵~
         BackpackMutationResult mutationResult = context.adapter().applyMutation(context.operation(), request);
-        // API 失败时不得扣减容器来源喵~
-        if (!mutationResult.applied() || mutationResult.snapshot() == null
-                || !context.advance(mutationResult.snapshot())) {
+        // apply 未确认时先区分明确未提交与状态不确定喵~
+        if (mutationResult == null) {
+            // 喵~防御：provider 返回空结果无法判断是否已提交，必须停止任务喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
+        // 明确需要 reconcile 的 provider 结果不能静默跳过喵~
+        if (mutationResult.status() == BackpackMutationResult.Status.RECONCILIATION_REQUIRED) {
+            // 保留 provider journal 并阻止后续猜测性写入喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
+        // 明确未应用的服务失败或 CAS 冲突可以安全跳过喵~
+        if (!mutationResult.applied()) {
             // 冲突或存储失败时保持容器不变喵~
             return skipped();
+        }
+        // apply 成功必须精确移动请求数量，否则不能扣减 Bukkit 来源喵~
+        if (mutationResult.movedAmount() != amount) {
+            // 喵~防御：部分成功或零移动会破坏数量守恒，立即进入人工 reconcile 喵~
+            logger.severe("[AutoChest] PlayerBackpack restock 数量不匹配，必须人工 reconcile: mutation="
+                    + mutationId);
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
+        // 喵~防御：applyMutation 已成功但 snapshot null 或 advance 失败时，背包已增加但容器未扣，必须补偿喵~
+        if (mutationResult.snapshot() == null || !context.advance(mutationResult.snapshot())) {
+            // 尝试以 targetAfter 作为新 before-image 恢复到原始 targetBefore 喵~
+            return compensateAppliedMutation(context, mutationId, logicalSlot, targetAfter, targetBefore,
+                    amount, mutationResult.newRevision(), BackpackMutationDirection.RESTOCK);
         }
         try {
             // source-first 写入 Bukkit 容器来源 after-image 喵~
@@ -229,6 +283,47 @@ public final class CrossStorageMutationCoordinator {
         // 写后不一致时尝试条件补偿 PlayerBackpack 目标喵~
         return compensateOrFail(context, containerInventory, containerSlot, sourceBefore, sourceAfter,
                 logicalSlot, targetBefore, targetAfter, amount, mutationId, BackpackMutationDirection.RESTOCK, null);
+    }
+
+    // apply 成功但上下文无法推进时，直接条件补偿 PlayerBackpack，容器尚未写入喵~
+    private Result compensateAppliedMutation(PlayerBackpackTaskContext context, UUID mutationId,
+                                             int logicalSlot, ItemStack appliedAfter,
+                                             ItemStack originalBefore, int amount,
+                                             long appliedRevision,
+                                             BackpackMutationDirection direction) {
+        // 喵~防御：补偿输入必须完整，避免生成无法验证的恢复请求喵~
+        if (context == null || appliedAfter == null || originalBefore == null || amount <= 0) {
+            // 记录无法构造安全补偿的严重状态喵~
+            logger.severe("[AutoChest] apply 成功后补偿参数非法，必须人工 reconcile: mutation=" + mutationId);
+            // 返回不可恢复并阻止任务继续喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
+        // 使用 provider 返回的新 revision 作为补偿 CAS 基线，不能依赖旧 context revision 喵~
+        if (appliedRevision < 0L) {
+            // 喵~防御：无效 provider revision 无法安全补偿喵~
+            logger.severe("[AutoChest] apply 成功后 revision 非法，必须人工 reconcile: mutation=" + mutationId);
+            // 返回不可恢复并停止任务喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
+        // 创建仅恢复本次 logical slot 的补偿请求喵~
+        UUID compensationMutationId = UUID.randomUUID();
+        // 使用 apply 后物品作为 CAS before-image，恢复原始物品喵~
+        BackpackMutationRequest compensationRequest = new BackpackMutationRequest(
+                compensationMutationId, context.operation().targetId(), direction,
+                appliedRevision, logicalSlot, appliedAfter, originalBefore, amount);
+        // 调用带 journal 的条件补偿接口喵~
+        BackpackMutationResult compensationResult = context.adapter().applyCompensation(
+                context.operation(), mutationId, compensationRequest);
+        // 补偿成功但 snapshot 无法推进时仍不能声明已恢复喵~
+        if (compensationResult.applied() && compensationResult.snapshot() != null
+                && context.advance(compensationResult.snapshot())) {
+            // 返回已恢复且不产生移动统计喵~
+            return new Result(Status.RECOVERED, 0);
+        }
+        // 喵~防御：补偿结果不确定时保留 journal 并中止任务喵~
+        logger.severe("[AutoChest] apply 成功后条件补偿失败，必须人工 reconcile: mutation=" + mutationId);
+        // 返回不可恢复状态，调用方必须释放会话喵~
+        return new Result(Status.FAILED_UNRECOVERABLE, 0);
     }
 
     // 尝试恢复 Bukkit 槽位并通过 API 条件恢复 PlayerBackpack 槽位喵~

@@ -143,23 +143,20 @@ public class DepositService {
         // 按预算逐容器处理，处理完后若有剩余让出 tick 继续
         processContainersBudgeted(phase, identities, player, world, playerTask, plan, stats, 0,
                 () -> {
-                    // 原版来源完成后才按逻辑槽位升序处理 PlayerBackpack 来源喵~
-                    ContainerOutcome backpackOutcome = processPlayerBackpackPhase(
-                            phase, identities, playerTask, plan, stats);
-                    // 喵~防御：跨域状态不确定时立即中止任务喵~
-                    if (backpackOutcome == ContainerOutcome.ABORT_TASK) {
-                        // 通知命令层走统一取消与会话释放出口喵~
-                        onDone.onCancelled();
-                        // 不进入下一阶段喵~
-                        return;
-                    }
-                    if (phase == Phase.FILL_EXISTING) {
-                        // FILL_EXISTING 完成后进入 USE_EMPTY 阶段
-                        Bukkit.getScheduler().runTask(plugin, () ->
-                                runPhase(Phase.USE_EMPTY, plan, playerTask, onDone, stats));
-                    } else {
-                        onDone.onComplete(stats);
-                    }
+                    // 原版来源完成后按 PlayerBackpack 独立 cursor 分 tick 处理喵~
+                    processPlayerBackpackPhase(phase, identities, playerTask, plan, stats,
+                            () -> {
+                                // PB 来源完成后才进入下一阶段或完成任务喵~
+                                if (phase == Phase.FILL_EXISTING) {
+                                    // FILL_EXISTING 完成后进入 USE_EMPTY 阶段喵~
+                                    Bukkit.getScheduler().runTask(plugin, () ->
+                                            runPhase(Phase.USE_EMPTY, plan, playerTask, onDone, stats));
+                                } else {
+                                    // 两个来源域均完成后报告任务成功喵~
+                                    onDone.onComplete(stats);
+                                }
+                            },
+                            onDone);
                 },
                 onDone);
     }
@@ -241,101 +238,226 @@ public class DepositService {
         return playerBackpackTaskContexts.get(playerTask.getPlayerUuid());
     }
 
-    // 处理 PlayerBackpack 来源，保持容器阶段与逻辑槽位升序规则喵~
-    private ContainerOutcome processPlayerBackpackPhase(Phase phase, List<ContainerIdentity> identities,
-                                                        PlayerTask playerTask, PlanResult plan,
-                                                        DepositStats stats) {
-        // 无跨域依赖时保持原版流程喵~
+    // 处理 PlayerBackpack 来源并在提交预算耗尽后保存 cursor 续跑喵~
+    private void processPlayerBackpackPhase(Phase phase, List<ContainerIdentity> identities,
+                                             PlayerTask playerTask, PlanResult plan,
+                                             DepositStats stats, Runnable onComplete,
+                                             DepositCallback onDone) {
+        // 无跨域依赖时直接完成 PB 阶段喵~
         if (crossStorageCoordinator == null || playerBackpackTaskContexts == null) {
-            // 返回继续表示没有 PlayerBackpack 来源喵~
-            return ContainerOutcome.CONTINUE;
+            // 没有 PB 来源无需执行任何主线程操作喵~
+            onComplete.run();
+            return;
         }
-        // 读取当前玩家登记的独占 PlayerBackpack 会话喵~
+        // 读取当前玩家登记的 PB 会话喵~
         PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(playerTask.getPlayerUuid());
-        // 会话缺失表示本次任务只处理原版域喵~
+        // 会话缺失或已关闭时安全跳过 PB 域喵~
         if (context == null || !context.isOpen()) {
-            // 返回继续而不猜测背包状态喵~
-            return ContainerOutcome.CONTINUE;
+            // 不猜测背包状态，交回统一完成出口喵~
+            onComplete.run();
+            return;
         }
-        // 按 API 快照的逻辑槽位升序复制键集合喵~
-        List<Integer> logicalSlots = new ArrayList<>(context.snapshot().items().keySet());
-        // 逐个逻辑槽位处理 PlayerBackpack 来源喵~
-        for (int logicalSlot : logicalSlots) {
-            // 读取当前快照中的来源物品喵~
+        // 从最新快照建立稳定 logical slot worklist，过滤空 key 和非法 key 喵~
+        List<Integer> logicalSlots = new ArrayList<>();
+        for (Integer logicalSlot : context.snapshot().items().navigableKeySet()) {
+            // 喵~防御：逻辑槽位必须为正数，deposit 可读取 overflow 但不写入 overflow 喵~
+            if (logicalSlot != null && logicalSlot > 0) {
+                // 保留稳定升序来源顺序喵~
+                logicalSlots.add(logicalSlot);
+            }
+        }
+        // 使用统一提交预算限制 PB validate 与 mutation 的主线程工作喵~
+        int operationsPerTick = Math.max(1, playerTask.getConfigSnapshot().getSubmitContainersPerTick());
+        long nanosPerTick = Math.max(1L, playerTask.getConfigSnapshot().getSubmitNanosPerTick());
+        // 创建当前 tick 的统一提交预算喵~
+        SubmissionBudget submissionBudget = new SubmissionBudget(operationsPerTick, nanosPerTick,
+                System.nanoTime());
+        // 从起点开始处理，完整 mutation 只在本次调用内执行喵~
+        processPlayerBackpackCursor(phase, identities, playerTask, plan, stats, logicalSlots,
+                0, 0, 0, submissionBudget, operationsPerTick, nanosPerTick, onComplete, onDone);
+    }
+
+    // 按 logical slot、容器和容器槽位 cursor 处理 PB 来源喵~
+    private void processPlayerBackpackCursor(Phase phase, List<ContainerIdentity> identities,
+                                              PlayerTask playerTask, PlanResult plan,
+                                              DepositStats stats, List<Integer> logicalSlots,
+                                              int logicalSlotIndex, int containerIndex,
+                                              int containerSlotIndex, SubmissionBudget submissionBudget,
+                                              int operationsPerTick, long nanosPerTick,
+                                              Runnable onComplete,
+                                              DepositCallback onDone) {
+        // 当前 tick 预算由调用方创建，跨 tick 不复用旧的时间起点喵~
+        // 读取当前会话，下一 tick 不复用旧上下文引用喵~
+        PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(playerTask.getPlayerUuid());
+        // 会话失效时立即取消并交给统一释放出口喵~
+        if (context == null || !context.isOpen()) {
+            // 跨域状态无法确认时禁止继续写入喵~
+            onDone.onCancelled();
+            return;
+        }
+        // 逐个 logical slot 处理来源喵~
+        while (logicalSlotIndex < logicalSlots.size()) {
+            // 从最新 snapshot 读取来源，避免使用跨 tick 旧物品镜像喵~
+            int logicalSlot = logicalSlots.get(logicalSlotIndex);
             ItemStack backpackItem = ContainerTransaction.cloneOrNull(context.snapshot().itemAt(logicalSlot));
-            // 空槽已被外部改变，跳过当前来源喵~
+            // 来源已为空则推进到下一个 logical slot 喵~
             if (backpackItem == null) {
+                logicalSlotIndex++;
+                containerIndex = 0;
+                containerSlotIndex = 0;
                 continue;
             }
-            // 使用任务快照候选资格约束 PlayerBackpack 来源物品喵~
+            // 生成完整物品身份，限制任务开始时候选容器资格喵~
             String itemKey = InventorySnapshotFactory.itemKey(backpackItem);
-            // 逐个容器按既有排序处理喵~
-            for (ContainerIdentity identity : identities) {
-                // 重新验证容器和 Hook，避免跨 tick 使用陈旧库存喵~
-                ContainerTransaction.ValidationResult validation = transaction.validate(playerTask, identity);
-                // Hook 运行期不可用时立即终止整个任务喵~
-                if (validation.failureResult == ContainerTransaction.Result.FAILED_HOOK_UNAVAILABLE) {
-                    return ContainerOutcome.ABORT_TASK;
+            // 遍历候选容器喵~
+            while (containerIndex < identities.size()) {
+                // 预算检查只能发生在完整 mutation 之间喵~
+                if (submissionBudget.exhausted(System.nanoTime())) {
+                    // 保存当前 cursor，并在下一 tick 重新验证任务和上下文喵~
+                    schedulePlayerBackpackContinuation(phase, identities, playerTask, plan, stats,
+                            logicalSlots, logicalSlotIndex, containerIndex, containerSlotIndex,
+                            operationsPerTick, nanosPerTick, onComplete, onDone);
+                    return;
                 }
-                // 失效容器或无快照候选资格时跳过喵~
+                // 验证当前容器和 Hook 喵~
+                ContainerIdentity identity = identities.get(containerIndex);
+                ContainerTransaction.ValidationResult validation = transaction.validate(playerTask, identity);
+                // 校验不代表完整 mutation，不消耗 mutation 预算，避免 maxOperations=1 时活锁喵~
+                // Hook 不可用时停止整个任务喵~
+                if (validation.failureResult == ContainerTransaction.Result.FAILED_HOOK_UNAVAILABLE) {
+                    // 交给命令层统一取消与释放喵~
+                    onDone.onCancelled();
+                    return;
+                }
+                // 失效容器或候选资格不符时尝试下一个容器喵~
                 if (!validation.isValid() || !plan.isSnapshotCandidate(itemKey, identity)) {
+                    containerIndex++;
+                    containerSlotIndex = 0;
                     continue;
                 }
-                // 遍历容器槽位，按阶段选择目标喵~
+                // 读取已验证容器库存，槽位扫描同样受纳秒预算限制喵~
                 Inventory inventory = validation.inventory;
-                for (int containerSlot = 0; containerSlot < inventory.getSize(); containerSlot++) {
+                while (containerSlotIndex < inventory.getSize()) {
+                    // 每个槽位读取前检查时间预算，避免 PB 大容器单 tick 长循环喵~
+                    if (submissionBudget.exhausted(System.nanoTime())) {
+                        // 保留当前槽位 cursor，下一 tick 从此处继续喵~
+                        schedulePlayerBackpackContinuation(phase, identities, playerTask, plan, stats,
+                                logicalSlots, logicalSlotIndex, containerIndex, containerSlotIndex,
+                                operationsPerTick, nanosPerTick, onComplete, onDone);
+                        return;
+                    }
                     // 读取实时目标槽位喵~
-                    ItemStack target = ContainerTransaction.cloneOrNull(inventory.getItem(containerSlot));
+                    ItemStack target = ContainerTransaction.cloneOrNull(inventory.getItem(containerSlotIndex));
                     // FILL_EXISTING 只处理已有相似未满堆叠喵~
                     if (phase == Phase.FILL_EXISTING && (target == null || !target.isSimilar(backpackItem)
                             || target.getAmount() >= target.getMaxStackSize())) {
+                        containerSlotIndex++;
                         continue;
                     }
-                    // USE_EMPTY 只在容器实时含同类物品时使用空槽喵~
-                    if (phase == Phase.USE_EMPTY && (target != null || !containerHasSimilar(inventory, backpackItem))) {
+                    // USE_EMPTY 必须保持容器相似资格喵~
+                    if (phase == Phase.USE_EMPTY && !containerHasSimilar(inventory, backpackItem)) {
+                        containerSlotIndex++;
                         continue;
                     }
-                    // 计算当前容器槽最多可移动数量喵~
+                    // USE_EMPTY 允许继续填充本阶段新建的相似未满堆喵~
+                    if (phase == Phase.USE_EMPTY && target != null
+                            && (!target.isSimilar(backpackItem) || target.getAmount() >= target.getMaxStackSize())) {
+                        containerSlotIndex++;
+                        continue;
+                    }
+                    // 计算当前目标槽可接收数量喵~
                     int capacity = target == null ? backpackItem.getMaxStackSize()
                             : target.getMaxStackSize() - target.getAmount();
-                    // 将移动量限制为来源现有数量和目标容量的较小值喵~
+                    // 限制移动数量不超过来源数量和目标容量喵~
                     int amount = Math.min(backpackItem.getAmount(), capacity);
-                    // 喵~防御：无正数移动量不创建 mutation 喵~
+                    // 喵~防御：非法移动数量只推进槽位，不执行 mutation 喵~
                     if (amount <= 0) {
+                        containerSlotIndex++;
                         continue;
                     }
-                    // 提交跨域 PlayerBackpack 到 Bukkit 协调 mutation 喵~
+                    // 跨域 mutation 必须在主线程完整执行，不在内部让出 tick 喵~
                     CrossStorageMutationCoordinator.Result result = crossStorageCoordinator.deposit(
-                            context, inventory, containerSlot, logicalSlot, amount);
-                    // 成功移动后刷新本地来源镜像并统计喵~
+                            context, inventory, containerSlotIndex, logicalSlot, amount);
+                    // 一次完整 mutation 结束后计入操作预算喵~
+                    submissionBudget.markOperation();
+                    // 成功后读取 context 最新 snapshot 并更新统计喵~
                     if (result.status() == CrossStorageMutationCoordinator.Status.SUCCESS) {
-                        // 统计双域实际移动数量喵~
+                        // 仅统计协调器确认的实际移动数量喵~
                         stats.itemsMoved += result.movedAmount();
-                        // 成功写入目标容器后按规范身份去重计入完成消息喵~
+                        // 成功写入目标后按 canonical identity 去重统计容器喵~
                         stats.markContainerUsed(identity);
-                        // 当前逻辑槽位已由 context snapshot 推进喵~
+                        // 重新读取来源，确保本阶段新建堆可被继续填充喵~
                         backpackItem = ContainerTransaction.cloneOrNull(context.snapshot().itemAt(logicalSlot));
-                        // 来源耗尽则转到下一个逻辑槽位喵~
+                        // 来源耗尽则推进 logical slot 喵~
                         if (backpackItem == null) {
+                            logicalSlotIndex++;
+                            containerIndex = 0;
+                            containerSlotIndex = 0;
                             break;
                         }
-                        // 继续使用当前容器后续槽位喵~
+                        // 当前槽位可能已满，推进到下一槽位喵~
+                        containerSlotIndex++;
                         continue;
                     }
-                    // 已恢复的失败跳过当前容器喵~
+                    // 已安全恢复时跳过当前容器喵~
                     if (result.status() == CrossStorageMutationCoordinator.Status.RECOVERED) {
                         stats.skipped++;
+                        containerIndex++;
+                        containerSlotIndex = 0;
                         break;
                     }
-                    // 不确定状态必须中止任务并释放会话喵~
-                    if (result.status() == CrossStorageMutationCoordinator.Status.FAILED_UNRECOVERABLE) {
-                        return ContainerOutcome.ABORT_TASK;
+                    // 未提交冲突只推进当前槽位，避免旧目标重复尝试喵~
+                    if (result.status() == CrossStorageMutationCoordinator.Status.SKIPPED) {
+                        containerSlotIndex++;
+                        continue;
                     }
+                    // 不确定状态必须立即取消任务喵~
+                    onDone.onCancelled();
+                    return;
+                }
+                // 当前容器扫描完成后进入下一个容器喵~
+                if (logicalSlotIndex < logicalSlots.size() &&
+                        context.snapshot().itemAt(logicalSlot) != null) {
+                    containerIndex++;
+                    containerSlotIndex = 0;
                 }
             }
+            // 所有容器均无法继续时推进来源，保持现有候选资格语义喵~
+            logicalSlotIndex++;
+            containerIndex = 0;
+            containerSlotIndex = 0;
         }
-        // PlayerBackpack 来源处理完成喵~
-        return ContainerOutcome.CONTINUE;
+        // 全部 PB 来源完成后执行阶段回调喵~
+        onComplete.run();
+    }
+
+    // 调度下一 tick 继续 PB cursor，并在回调前重新验证玩家生命周期喵~
+    private void schedulePlayerBackpackContinuation(Phase phase, List<ContainerIdentity> identities,
+                                                     PlayerTask playerTask, PlanResult plan,
+                                                     DepositStats stats, List<Integer> logicalSlots,
+                                                     int logicalSlotIndex, int containerIndex,
+                                                     int containerSlotIndex, int operationsPerTick,
+                                                     long nanosPerTick, Runnable onComplete,
+                                                     DepositCallback onDone) {
+        // 使用 Bukkit 主线程 scheduler 续跑，避免跨线程访问 Bukkit 对象喵~
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            // 重新获取玩家并确认任务仍处于有效世界喵~
+            Player player = Bukkit.getPlayer(playerTask.getPlayerUuid());
+            // 喵~防御：玩家离线、死亡、换世界或任务失效时取消写入喵~
+            if (!registry.isValid(playerTask) || player == null || !player.isOnline() || player.isDead()
+                    || !player.getWorld().getUID().equals(playerTask.getWorldUuid())) {
+                // 交给统一完成出口释放会话喵~
+                onDone.onCancelled();
+                return;
+            }
+            // 为下一 tick 创建新的时间与操作预算喵~
+            SubmissionBudget nextSubmissionBudget = new SubmissionBudget(operationsPerTick, nanosPerTick,
+                    System.nanoTime());
+            // 以新上下文和相同 immutable worklist 继续处理喵~
+            processPlayerBackpackCursor(phase, identities, playerTask, plan, stats, logicalSlots,
+                    logicalSlotIndex, containerIndex, containerSlotIndex, nextSubmissionBudget,
+                    operationsPerTick, nanosPerTick, onComplete, onDone);
+        });
     }
 
     /**
