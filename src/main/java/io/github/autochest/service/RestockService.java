@@ -234,27 +234,44 @@ public class RestockService {
                         needed = 0;
                         break;
                     }
-                    ContainerOutcome containerOutcome = transferFromContainer(player, containerInv, playerSlot,
-                            expectedItem, needed, playerTask, whitelist, stats);
-                    if (containerOutcome == ContainerOutcome.ABORT_TASK) {
+                    // 创建容器内槽位预算，用于限制内层循环喵~
+                    SubmissionBudget innerBudget = new SubmissionBudget(
+                            containersPerTick - processed, nanosPerTick - (System.nanoTime() - tickStart), System.nanoTime());
+                    TransferFromContainerResult transferResult = transferFromContainerBudgeted(
+                            player, containerInv, playerSlot, expectedItem, needed, playerTask, whitelist, stats, innerBudget);
+
+                    if (transferResult.outcome == ContainerOutcome.ABORT_TASK) {
                         // 喵~防御：库存事务无法安全恢复，立即中止整个任务。
                         onDone.onCancelled();
                         return;
                     }
-                    if (containerOutcome == ContainerOutcome.SKIP_CONTAINER) {
+
+                    // 预算耗尽时保存当前 cursor 并调度下一 tick 喵~
+                    if (transferResult.budgetExhausted) {
+                        final int nextSi = si;
+                        final int nextCi = ci;
+                        Bukkit.getScheduler().runTask(plugin, () -> {
+                            Player fp = Bukkit.getPlayer(playerTask.getPlayerUuid());
+                            if (!registry.isValid(playerTask) || fp == null || !fp.isOnline() || fp.isDead()
+                                    || !fp.getWorld().getUID().equals(playerTask.getWorldUuid())) {
+                                onDone.onCancelled();
+                                return;
+                            }
+                            processSlotsBudgeted(eligibleSlots, nextSi, nextCi, identities,
+                                    playerTask, whitelist, stats, onDone);
+                        });
+                        return;
+                    }
+
+                    if (transferResult.outcome == ContainerOutcome.SKIP_CONTAINER) {
                         stats.skipped++;
                     } else {
-                        ItemStack updatedPlayerItem =
-                                ContainerTransaction.cloneOrNull(player.getInventory().getItem(playerSlot));
-                        if (updatedPlayerItem == null) {
-                            needed = 0;
-                        } else {
-                            needed = whitelist.getMaxStackSize(playerSlot) - updatedPlayerItem.getAmount();
-                        }
+                        // 更新剩余需求喵~
+                        needed = transferResult.remainingNeeded;
                     }
-                    // 仅当本容器实际移动了物品时才计为"参与容器"。
+                    // 仅当本容器实际移动了物品时才计为参与容器喵~
                     if (stats.itemsMoved > itemsBeforeThisContainer) {
-                        stats.containersUsed++;
+                        stats.markContainerUsed(identity);
                     }
                 } else {
                     stats.skipped++;
@@ -274,7 +291,7 @@ public class RestockService {
     }
 
     /**
-     * 从一个已验证容器向当前玩家目标槽位转移同类物品
+     * 从一个已验证容器向当前玩家目标槽位转移同类物品，使用预算限制内层循环喵~
      *
      * @param player        执行补货的玩家
      * @param containerInv  已验证容器库存
@@ -284,13 +301,19 @@ public class RestockService {
      * @param playerTask    当前玩家任务
      * @param whitelist     目标白名单
      * @param stats         累计统计
-     * @return 当前容器处理结果
+     * @param budget        内层槽位预算喵~
+     * @return 容器转移结果喵~
      */
-    private ContainerOutcome transferFromContainer(Player player, Inventory containerInv,
+    private TransferFromContainerResult transferFromContainerBudgeted(Player player, Inventory containerInv,
                                                    int playerSlot, ItemStack expectedItem, int needed,
                                                    PlayerTask playerTask, RestockTargetWhitelist whitelist,
-                                                   RestockStats stats) {
+                                                   RestockStats stats, SubmissionBudget budget) {
         for (int containerSlot = 0; containerSlot < containerInv.getSize() && needed > 0; containerSlot++) {
+            // 每个槽位边界检查预算喵~
+            if (budget.exhausted(System.nanoTime())) {
+                return new TransferFromContainerResult(ContainerOutcome.CONTINUE, needed, true);
+            }
+
             ItemStack containerItem = ContainerTransaction.cloneOrNull(containerInv.getItem(containerSlot));
             if (containerItem == null || !containerItem.isSimilar(expectedItem)) {
                 continue;
@@ -298,12 +321,12 @@ public class RestockService {
 
             // 喵~防御：任务快照禁止补货时不得向该槽位提交事务。
             if (!playerTask.getPreferencesSnapshot().allowsRestock(playerSlot)) {
-                return ContainerOutcome.CONTINUE;
+                return new TransferFromContainerResult(ContainerOutcome.CONTINUE, needed, false);
             }
             // 喵~防御：每次提交前重新确认任务和目标槽位仍有效，避免事件或生命周期变化后写入。
             ItemStack submitPlayerItem = ContainerTransaction.cloneOrNull(player.getInventory().getItem(playerSlot));
             if (!registry.isValid(playerTask) || !whitelist.isEligible(playerSlot, submitPlayerItem)) {
-                return ContainerOutcome.CONTINUE;
+                return new TransferFromContainerResult(ContainerOutcome.CONTINUE, needed, false);
             }
 
             int canMove = Math.min(needed, containerItem.getAmount());
@@ -319,13 +342,26 @@ public class RestockService {
                 continue;
             }
             if (commitResult.status == ContainerTransaction.CommitStatus.RECOVERED) {
-                return ContainerOutcome.SKIP_CONTAINER;
+                return new TransferFromContainerResult(ContainerOutcome.SKIP_CONTAINER, needed, false);
             }
             if (commitResult.status == ContainerTransaction.CommitStatus.FAILED_UNRECOVERABLE) {
-                return ContainerOutcome.ABORT_TASK;
+                return new TransferFromContainerResult(ContainerOutcome.ABORT_TASK, needed, false);
             }
         }
-        return ContainerOutcome.CONTINUE;
+        return new TransferFromContainerResult(ContainerOutcome.CONTINUE, needed, false);
+    }
+
+    // 容器内转移结果喵~
+    private static class TransferFromContainerResult {
+        final ContainerOutcome outcome;
+        final int remainingNeeded;
+        final boolean budgetExhausted;
+
+        TransferFromContainerResult(ContainerOutcome outcome, int remainingNeeded, boolean budgetExhausted) {
+            this.outcome = outcome;
+            this.remainingNeeded = remainingNeeded;
+            this.budgetExhausted = budgetExhausted;
+        }
     }
 
 

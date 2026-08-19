@@ -18,9 +18,9 @@ public record BackpackSnapshot(UUID playerId, int capacity, long revision, Navig
             if (entry.getKey() == null) {
                 continue;
             }
-            // 喵~防御：拒绝容量外槽位，防止 overflow 写入错误目标喵~
-            if (entry.getKey() <= 0 || entry.getKey() > capacity) {
-                throw new IllegalArgumentException("背包逻辑槽位超出容量喵~");
+            // 喵~防御：拒绝非正槽位，容量外槽位保留用于 deposit 读取但禁止作为写入目标喵~
+            if (entry.getKey() <= 0) {
+                throw new IllegalArgumentException("背包逻辑槽位非法喵~");
             }
             // 读取 provider 返回的物品镜像喵~
             ItemStack item = entry.getValue();

@@ -402,7 +402,6 @@ public class DepositService {
                     // 已安全恢复时跳过当前容器喵~
                     if (result.status() == CrossStorageMutationCoordinator.Status.RECOVERED) {
                         stats.skipped++;
-                        containerIndex++;
                         containerSlotIndex = 0;
                         break;
                     }

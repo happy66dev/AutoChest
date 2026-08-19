@@ -144,9 +144,17 @@ public final class CrossStorageMutationCoordinator {
                     + mutationId);
             return new Result(Status.FAILED_UNRECOVERABLE, 0);
         }
-        // 喵~防御：applyMutation 已成功但 snapshot null 或 advance 失败时，背包已扣除但容器未写，必须补偿喵~
-        if (mutationResult.snapshot() == null || !context.advance(mutationResult.snapshot())) {
-            // 尝试以 sourceAfter 作为新 before-image 恢复到原始 sourceBefore 喵~
+        // provider 返回的 revision 与 snapshot 必须一致，且必须严格推进当前 revision 喵~
+        if (mutationResult.snapshot() == null
+                || mutationResult.newRevision() != mutationResult.snapshot().revision()
+                || mutationResult.newRevision() <= currentSnapshot.revision()) {
+            // 喵~防御：revision 契约不一致时禁止推进上下文，避免补偿 CAS 使用错误基线喵~
+            return compensateAppliedMutation(context, mutationId, logicalSlot, sourceAfter, sourceBefore,
+                    amount, mutationResult.newRevision(), BackpackMutationDirection.DEPOSIT);
+        }
+        // applyMutation 已成功且 revision 契约正确时推进上下文喵~
+        if (!context.advance(mutationResult.snapshot())) {
+            // 上下文推进失败时尝试条件补偿喵~
             return compensateAppliedMutation(context, mutationId, logicalSlot, sourceAfter, sourceBefore,
                     amount, mutationResult.newRevision(), BackpackMutationDirection.DEPOSIT);
         }
@@ -259,9 +267,17 @@ public final class CrossStorageMutationCoordinator {
                     + mutationId);
             return new Result(Status.FAILED_UNRECOVERABLE, 0);
         }
-        // 喵~防御：applyMutation 已成功但 snapshot null 或 advance 失败时，背包已增加但容器未扣，必须补偿喵~
-        if (mutationResult.snapshot() == null || !context.advance(mutationResult.snapshot())) {
-            // 尝试以 targetAfter 作为新 before-image 恢复到原始 targetBefore 喵~
+        // provider 返回的 revision 与 snapshot 必须一致，且必须严格推进当前 revision 喵~
+        if (mutationResult.snapshot() == null
+                || mutationResult.newRevision() != mutationResult.snapshot().revision()
+                || mutationResult.newRevision() <= currentSnapshot.revision()) {
+            // 喵~防御：revision 契约不一致时禁止推进上下文，避免补偿 CAS 使用错误基线喵~
+            return compensateAppliedMutation(context, mutationId, logicalSlot, targetAfter, targetBefore,
+                    amount, mutationResult.newRevision(), BackpackMutationDirection.RESTOCK);
+        }
+        // applyMutation 已成功且 revision 契约正确时推进上下文喵~
+        if (!context.advance(mutationResult.snapshot())) {
+            // 上下文推进失败时尝试条件补偿喵~
             return compensateAppliedMutation(context, mutationId, logicalSlot, targetAfter, targetBefore,
                     amount, mutationResult.newRevision(), BackpackMutationDirection.RESTOCK);
         }
@@ -356,23 +372,27 @@ public final class CrossStorageMutationCoordinator {
             // 返回不可恢复状态并停止任务喵~
             return new Result(Status.FAILED_UNRECOVERABLE, 0);
         }
-        // 只有容器仍是本事务写入后的 after-image 时，才允许恢复容器 before-image 喵~
-        if (!sameSlot(currentBukkitItem, bukkitAfter)) {
+        // 当前槽位已经回到 before-image 时无需重复写容器，直接进入 PlayerBackpack 补偿喵~
+        if (sameSlot(currentBukkitItem, bukkitBefore)) {
+            // 保留 before-image 现场，跳过容器恢复步骤喵~
+        } else if (!sameSlot(currentBukkitItem, bukkitAfter)) {
             // 容器处于第三种状态时无法证明归属，必须保留现场并隔离任务喵~
             logger.log(Level.SEVERE, "[AutoChest] 跨域失败后 Bukkit 槽位已被外部修改，必须人工 reconcile: mutation="
                     + originalMutationId + " logicalSlot=" + logicalSlot, writeException);
             // 返回不可恢复状态，禁止覆盖外部修改喵~
             return new Result(Status.FAILED_UNRECOVERABLE, 0);
-        }
-        try {
-            // 先条件恢复容器 before-image，避免覆盖外部并发修改喵~
-            inventory.setItem(bukkitSlot, ContainerTransaction.cloneOrNull(bukkitBefore));
-        } catch (RuntimeException restoreException) {
-            // 喵~防御：容器条件恢复异常时保留两域现场并记录审计喵~
-            logger.log(Level.SEVERE, "[AutoChest] 跨域失败后 Bukkit before-image 恢复失败，必须人工 reconcile: mutation="
-                    + originalMutationId + " logicalSlot=" + logicalSlot, restoreException);
-            // 返回不可恢复状态喵~
-            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        } else {
+            // 只有 after-image 仍然存在时才执行条件恢复喵~
+            try {
+                // 先条件恢复容器 before-image，避免覆盖外部并发修改喵~
+                inventory.setItem(bukkitSlot, ContainerTransaction.cloneOrNull(bukkitBefore));
+            } catch (RuntimeException restoreException) {
+                // 喵~防御：容器条件恢复异常时保留两域现场并记录审计喵~
+                logger.log(Level.SEVERE, "[AutoChest] 跨域失败后 Bukkit before-image 恢复失败，必须人工 reconcile: mutation="
+                        + originalMutationId + " logicalSlot=" + logicalSlot, restoreException);
+                // 返回不可恢复状态喵~
+                return new Result(Status.FAILED_UNRECOVERABLE, 0);
+            }
         }
         // 记录恢复后的容器镜像喵~
         ItemStack restoredBukkitItem;
@@ -411,8 +431,9 @@ public final class CrossStorageMutationCoordinator {
                     + originalMutationId, compensationException);
             return new Result(Status.FAILED_UNRECOVERABLE, 0);
         }
-        // 只有已提交或幂等重放且快照存在并严格推进上下文时才确认完全恢复喵~
-        if (compensationResult != null && compensationResult.applied() && compensationResult.snapshot() != null
+        // 只有已提交或幂等重放、精确移动数量、快照存在且严格推进时才确认完全恢复喵~
+        if (compensationResult != null && compensationResult.applied()
+                && compensationResult.movedAmount() == amount && compensationResult.snapshot() != null
                 && context.advance(compensationResult.snapshot())) {
             // 两侧均回到 before-image，报告已恢复且不计入成功搬运喵~
             return new Result(Status.RECOVERED, 0);

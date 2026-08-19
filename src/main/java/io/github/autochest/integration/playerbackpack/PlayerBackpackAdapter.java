@@ -162,19 +162,21 @@ public final class PlayerBackpackAdapter {
     }
 
     private Object invoke(String methodName, Object... arguments) throws ReflectiveOperationException {
+        // 按方法名和实际参数类型构造精确缓存键，避免同名同参数数量重载串用喵~
+        String methodKey = methodKey(methodName, arguments);
         // 优先使用缓存方法，避免每次调用重复遍历 API 方法列表喵~
-        Method cachedMethod = apiMethods.get(methodName + "#" + arguments.length);
-        // 首次调用时加载 API 接口并查找精确参数数量的方法喵~
+        Method cachedMethod = apiMethods.get(methodKey);
+        // 首次调用时加载 API 接口并查找参数类型兼容的方法喵~
         if (cachedMethod == null) {
             // 仅在首次调用加载 API 类型，保持缺少 API 时安全失败喵~
             Class<?> apiInterface = Class.forName("com.playerbackpack.api.PlayerBackpackApi", false, apiClassLoader);
-            // 遍历公开方法并缓存匹配项喵~
+            // 遍历公开方法并寻找唯一兼容签名喵~
             for (Method method : apiInterface.getMethods()) {
-                // 方法名和参数数量共同确定当前桥接入口喵~
-                if (method.getName().equals(methodName) && method.getParameterCount() == arguments.length) {
-                    // 缓存当前方法供后续调用复用喵~
+                // 方法名、参数数量和参数类型共同确定桥接入口喵~
+                if (method.getName().equals(methodName) && parametersMatch(method.getParameterTypes(), arguments)) {
+                    // 缓存当前精确方法供后续调用复用喵~
                     cachedMethod = method;
-                    apiMethods.put(methodName + "#" + arguments.length, method);
+                    apiMethods.put(methodKey, method);
                     break;
                 }
             }
@@ -186,6 +188,54 @@ public final class PlayerBackpackAdapter {
         }
         // 调用缓存方法并返回 provider 原始结果喵~
         return cachedMethod.invoke(api, arguments);
+    }
+
+    // 构造包含参数运行时类型的稳定反射缓存键喵~
+    private String methodKey(String methodName, Object[] arguments) {
+        // 以方法名和参数数量作为键前缀喵~
+        StringBuilder keyBuilder = new StringBuilder(methodName).append('#').append(arguments.length);
+        // 追加每个参数的实际类型，null 使用固定占位符喵~
+        for (Object argument : arguments) {
+            keyBuilder.append('#').append(argument == null ? "null" : argument.getClass().getName());
+        }
+        // 返回不可变字符串键喵~
+        return keyBuilder.toString();
+    }
+
+    // 判断反射方法参数是否能安全接收当前运行时参数喵~
+    private boolean parametersMatch(Class<?>[] parameterTypes, Object[] arguments) {
+        // 参数数量不同的方法不能作为候选喵~
+        if (parameterTypes.length != arguments.length) {
+            return false;
+        }
+        // 逐个检查 null 和可赋值关系喵~
+        for (int index = 0; index < parameterTypes.length; index++) {
+            // null 不能传给 primitive 参数喵~
+            if (arguments[index] == null && parameterTypes[index].isPrimitive()) {
+                return false;
+            }
+            // 非 null 参数必须能赋值到声明类型喵~
+            if (arguments[index] != null && !wrap(parameterTypes[index]).isInstance(arguments[index])) {
+                return false;
+            }
+        }
+        // 所有参数均兼容喵~
+        return true;
+    }
+
+    // 将 primitive 类型映射为包装类型以统一反射参数判断喵~
+    private Class<?> wrap(Class<?> type) {
+        // 映射常用 primitive 类型喵~
+        if (type == int.class) return Integer.class;
+        if (type == long.class) return Long.class;
+        if (type == boolean.class) return Boolean.class;
+        if (type == double.class) return Double.class;
+        if (type == float.class) return Float.class;
+        if (type == short.class) return Short.class;
+        if (type == byte.class) return Byte.class;
+        if (type == char.class) return Character.class;
+        // void 和引用类型无需转换喵~
+        return type;
     }
 
     private Object toNativeRequest(BackpackMutationRequest request) throws ReflectiveOperationException {
