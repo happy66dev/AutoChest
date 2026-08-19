@@ -163,8 +163,8 @@ public class RestockService {
             return;
         }
 
-        int containersPerTick = playerTask.getConfigSnapshot().getSubmitContainersPerTick();
-        long nanosPerTick = playerTask.getConfigSnapshot().getSubmitNanosPerTick();
+        int containersPerTick = Math.max(1, playerTask.getConfigSnapshot().getSubmitContainersPerTick());
+        long nanosPerTick = Math.max(1L, playerTask.getConfigSnapshot().getSubmitNanosPerTick());
         long tickStart = System.nanoTime();
         int processed = 0;
 
@@ -488,8 +488,7 @@ public class RestockService {
                         targetItem = ContainerTransaction.cloneOrNull(context.snapshot().itemAt(logicalSlot));
                         // 目标满后进入下一个逻辑槽位喵~
                         if (targetItem == null || targetItem.getAmount() >= targetItem.getMaxStackSize()) {
-                            // 推进目标并重置 cursor 喵~
-                            currentLogicalSlotIndex++;
+                            // 让外层统一推进一次逻辑槽位，避免跳过下一个目标喵~
                             currentContainerIndex = 0;
                             currentContainerSlotIndex = 0;
                             break;
