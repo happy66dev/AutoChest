@@ -829,39 +829,52 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         // 提交异步规划。
         try {
             plugin.getExecutor().submit(() -> {
-                // 异步线程只建立快照候选索引，不访问 Bukkit 对象。
-                PlanResult plan = planner.plan(containerDtos);
-                // 回到主线程执行存入
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    if (!registry.isValid(task)) {
-                        finishTask(task);
-                        return;
-                    }
-                    depositService.execute(plan, task, new DepositService.DepositCallback() {
-                        @Override
-                        public void onComplete(DepositService.DepositStats stats) {
-                            Player p = Bukkit.getPlayer(task.getPlayerUuid());
-                            if (p != null && p.isOnline()) {
-                                if (stats.itemsMoved == 0) {
-                                    plugin.getMessageService().sendNoMatch(p);
-                                } else {
-                                    plugin.getMessageService().sendDepositDone(p,
-                                            stats.itemsMoved, stats.containersUsed, stats.skipped);
-                                }
-                            }
+                try {
+                    // 异步线程只建立快照候选索引，不访问 Bukkit 对象。
+                    PlanResult plan = planner.plan(containerDtos);
+                    // 回到主线程执行存入
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        if (!registry.isValid(task)) {
                             finishTask(task);
+                            return;
                         }
-
-                        @Override
-                        public void onCancelled() {
-                            Player p = Bukkit.getPlayer(task.getPlayerUuid());
-                            if (p != null && p.isOnline()) {
-                                plugin.getMessageService().sendCancelled(p);
+                        depositService.execute(plan, task, new DepositService.DepositCallback() {
+                            @Override
+                            public void onComplete(DepositService.DepositStats stats) {
+                                Player completedPlayer = Bukkit.getPlayer(task.getPlayerUuid());
+                                if (completedPlayer != null && completedPlayer.isOnline()) {
+                                    if (stats.itemsMoved == 0) {
+                                        plugin.getMessageService().sendNoMatch(completedPlayer);
+                                    } else {
+                                        plugin.getMessageService().sendDepositDone(completedPlayer,
+                                                stats.itemsMoved, stats.containersUsed, stats.skipped);
+                                    }
+                                }
+                                finishTask(task);
                             }
-                            finishTask(task);
+
+                            @Override
+                            public void onCancelled() {
+                                Player cancelledPlayer = Bukkit.getPlayer(task.getPlayerUuid());
+                                if (cancelledPlayer != null && cancelledPlayer.isOnline()) {
+                                    plugin.getMessageService().sendCancelled(cancelledPlayer);
+                                }
+                                finishTask(task);
+                            }
+                        });
+                    });
+                } catch (Throwable planningFailure) {
+                    // 喵~防御：规划线程任意异常都必须回主线程释放任务，避免永久占用玩家锁喵~
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        // 任务可能已被生命周期事件释放，finishTask 保持 token 条件幂等喵~
+                        finishTask(task);
+                        // 在线玩家收到取消提示，明确本次规划失败喵~
+                        Player failedPlayer = Bukkit.getPlayer(task.getPlayerUuid());
+                        if (failedPlayer != null && failedPlayer.isOnline()) {
+                            plugin.getMessageService().sendCancelled(failedPlayer);
                         }
                     });
-                });
+                }
             });
         } catch (RejectedExecutionException e) {
             // 线程池队列已满
@@ -944,40 +957,57 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
 
         try {
             plugin.getExecutor().submit(() -> {
-                PlanResult plan = planner.planForRestock(containerIdentities);
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    if (!registry.isValid(task)) {
-                        restockListener.stopTracking(task.getPlayerUuid(), whitelist);
-                        finishTask(task);
-                        return;
-                    }
-                    restockService.execute(plan, task, whitelist, new RestockService.RestockCallback() {
-                        @Override
-                        public void onComplete(RestockService.RestockStats stats) {
+                try {
+                    // 异步线程只执行纯数据规划，不访问 Bukkit 对象。
+                    PlanResult plan = planner.planForRestock(containerIdentities);
+                    // 规划完成后切回主线程执行补货。
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        if (!registry.isValid(task)) {
                             restockListener.stopTracking(task.getPlayerUuid(), whitelist);
-                            Player p = Bukkit.getPlayer(task.getPlayerUuid());
-                            if (p != null && p.isOnline()) {
-                                if (stats.itemsMoved == 0) {
-                                    plugin.getMessageService().sendNoMatch(p);
-                                } else {
-                                    plugin.getMessageService().sendRestockDone(p,
-                                            stats.itemsMoved, stats.containersUsed, stats.skipped);
-                                }
-                            }
                             finishTask(task);
+                            return;
                         }
-
-                        @Override
-                        public void onCancelled() {
-                            restockListener.stopTracking(task.getPlayerUuid(), whitelist);
-                            Player p = Bukkit.getPlayer(task.getPlayerUuid());
-                            if (p != null && p.isOnline()) {
-                                plugin.getMessageService().sendCancelled(p);
+                        restockService.execute(plan, task, whitelist, new RestockService.RestockCallback() {
+                            @Override
+                            public void onComplete(RestockService.RestockStats stats) {
+                                restockListener.stopTracking(task.getPlayerUuid(), whitelist);
+                                Player completedPlayer = Bukkit.getPlayer(task.getPlayerUuid());
+                                if (completedPlayer != null && completedPlayer.isOnline()) {
+                                    if (stats.itemsMoved == 0) {
+                                        plugin.getMessageService().sendNoMatch(completedPlayer);
+                                    } else {
+                                        plugin.getMessageService().sendRestockDone(completedPlayer,
+                                                stats.itemsMoved, stats.containersUsed, stats.skipped);
+                                    }
+                                }
+                                finishTask(task);
                             }
-                            finishTask(task);
+
+                            @Override
+                            public void onCancelled() {
+                                restockListener.stopTracking(task.getPlayerUuid(), whitelist);
+                                Player cancelledPlayer = Bukkit.getPlayer(task.getPlayerUuid());
+                                if (cancelledPlayer != null && cancelledPlayer.isOnline()) {
+                                    plugin.getMessageService().sendCancelled(cancelledPlayer);
+                                }
+                                finishTask(task);
+                            }
+                        });
+                    });
+                } catch (Throwable planningFailure) {
+                    // 喵~防御：规划线程任意异常都必须回主线程释放任务，避免永久占用玩家锁喵~
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        // 停止白名单跟踪，避免规划失败后残留补货状态喵~
+                        restockListener.stopTracking(task.getPlayerUuid(), whitelist);
+                        // 任务可能已经被生命周期事件释放，finishTask 保持幂等喵~
+                        finishTask(task);
+                        // 在线玩家收到取消提示，明确本次规划失败喵~
+                        Player failedPlayer = Bukkit.getPlayer(task.getPlayerUuid());
+                        if (failedPlayer != null && failedPlayer.isOnline()) {
+                            plugin.getMessageService().sendCancelled(failedPlayer);
                         }
                     });
-                });
+                }
             });
         } catch (RejectedExecutionException e) {
             restockListener.stopTracking(task.getPlayerUuid(), whitelist);
