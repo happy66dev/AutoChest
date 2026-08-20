@@ -7,6 +7,7 @@ import io.github.autochest.container.ContainerIdentity;
 import io.github.autochest.hook.CompositeAccessPolicy;
 import io.github.autochest.gui.PreferencesGui;
 import io.github.autochest.integration.playerbackpack.PlayerBackpackAdapter;
+import io.github.autochest.integration.playerbackpack.PlayerBackpackAsyncAdapter;
 import io.github.autochest.integration.playerbackpack.PlayerBackpackTaskContext;
 import io.github.autochest.integration.playerbackpack.PlayerBackpackTaskContexts;
 import io.github.autochest.integration.playerbackpack.BackpackOperationFailure;
@@ -333,12 +334,22 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
     // 在主线程开始 PlayerBackpack 外部操作并于下一 tick 建立最新快照喵~
     private boolean beginPlayerBackpackThenNextTick(Player player, OperationType operationType,
                                                     Runnable afterFreeze) {
-        // 读取已校验的可选适配器喵~
-        PlayerBackpackAdapter adapter = plugin.getPlayerBackpackHook() == null
-                ? null : plugin.getPlayerBackpackHook().adapter();
+        // 读取可选 Hook，缺失时保持原版流程喵~
+        io.github.autochest.integration.playerbackpack.PlayerBackpackHook hook = plugin.getPlayerBackpackHook();
+        // 仅在明确可写、已就绪的 v2 provider 存在时固定选择 async backend 喵~
+        PlayerBackpackAsyncAdapter asyncAdapter = hook != null && hook.supportsAsyncWriteOperations()
+                ? hook.asyncAdapter() : null;
+        // v2 provider 存在时禁止回退 v1，按异步 GUI 冻结和快照状态机建立固定 backend 喵~
+        if (asyncAdapter != null) {
+            // 异步预备完成后由 callback 创建任务喵~
+            beginAsyncPlayerBackpackThenNextTick(player, operationType, asyncAdapter, afterFreeze);
+            // 表示已接管跨域预备流程喵~
+            return true;
+        }
+        // 读取已校验同步 v1 适配器，只在没有 v2 backend 时使用喵~
+        PlayerBackpackAdapter adapter = hook == null ? null : hook.adapter();
         // 不可用时返回 false 让调用方执行原版流程喵~
         if (adapter == null) {
-            // 原版流程不需要外部会话喵~
             return false;
         }
         // 尝试取得当前玩家目标背包独占会话喵~
@@ -346,9 +357,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                 player.getUniqueId(), player.getUniqueId(), operationType.name().toLowerCase(Locale.ROOT));
         // 喵~防御：目标繁忙或 provider 异常时 fail-closed 拒绝扩展任务喵~
         if (operationOptional.isEmpty()) {
-            // 不调用 afterFreeze，避免没有双域快照时继续写入喵~
             plugin.getMessageService().sendTaskConflict(player);
-            // 返回 true 表示命令已处理，但本次扩展任务被安全拒绝喵~
             return true;
         }
         // 取得独占操作句柄喵~
@@ -357,51 +366,126 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         BackpackOperationFailure freezeFailure = adapter.saveAndCloseOpenGui(operation);
         // 只有 NONE 表示冻结成功喵~
         if (freezeFailure != BackpackOperationFailure.NONE) {
-            // 释放冻结失败的外部会话喵~
             adapter.finish(operation);
-            // 明确提示外部 GUI 无法安全冻结，避免命令静默失败喵~
             plugin.getMessageService().sendCancelled(player);
-            // 拒绝扩展任务并提示原版流程不可安全启动喵~
             return true;
         }
         // 下一 tick 读取关闭 GUI 后的最新 snapshot 喵~
         Bukkit.getScheduler().runTask(plugin, () -> {
-            // 下一 tick 复核目标 GUI 已关闭，阻止迟到关闭事件覆盖外部 mutation 喵~
             BackpackOperationFailure readinessFailure = adapter.confirmExternalOperationReady(operation);
-            // 喵~防御：无法证明 GUI 已关闭时释放 operation，不创建任务喵~
             if (readinessFailure != BackpackOperationFailure.NONE) {
-                // 释放未能进入安全状态的外部会话喵~
                 adapter.finish(operation);
-                // 玩家仍在线时明确提示本次跨域任务取消喵~
                 if (player.isOnline()) {
                     plugin.getMessageService().sendCancelled(player);
                 }
-                // 结束下一 tick 预备流程喵~
                 return;
             }
-            // 喵~防御：下一 tick 读取失败时释放会话而不创建任务喵~
             Optional<BackpackSnapshot> snapshotOptional = adapter.loadSnapshot(player.getUniqueId());
             if (snapshotOptional.isEmpty()) {
-                // 释放无法建立快照的外部操作喵~
                 adapter.finish(operation);
-                // 不执行任何 Bukkit/PlayerBackpack 写入喵~
                 return;
             }
-            // 创建绑定目标和 revision 的任务上下文喵~
             PlayerBackpackTaskContext context = new PlayerBackpackTaskContext(
                     adapter, operation, snapshotOptional.get());
-            // 喵~防御：上下文登记失败时释放会话，避免并发任务双持有喵~
             if (!playerBackpackTaskContexts.register(player.getUniqueId(), context)) {
-                // 释放未登记上下文喵~
                 context.close();
-                // 不启动任务喵~
                 return;
             }
-            // 运行统一的后续任务创建回调喵~
             afterFreeze.run();
         });
-        // 已进入下一 tick 预备流程喵~
         return true;
+    }
+
+    // 使用 v2 async API 保存关闭 GUI、确认 readiness 并在下一 tick 建立固定 backend 会话喵~
+    private void beginAsyncPlayerBackpackThenNextTick(Player player, OperationType operationType,
+                                                       PlayerBackpackAsyncAdapter asyncAdapter, Runnable afterFreeze) {
+        // 喵~防御：预备参数缺失时不能预约或冻结任意背包喵~
+        if (player == null || asyncAdapter == null || afterFreeze == null) {
+            // 结束不完整预备流程喵~
+            return;
+        }
+        // 主线程 capture 不可变玩家身份，异步 callback 不再读取易变 Player 对象喵~
+        java.util.UUID playerId = player.getUniqueId();
+        // 异步预约外部 operation，不阻塞 Bukkit 主线程喵~
+        asyncAdapter.tryBeginOperationAsync(playerId, playerId, operationType.name().toLowerCase(Locale.ROOT))
+                .thenCompose(operationOptional -> {
+                    // 预约失败时返回空值，由主线程发送冲突消息喵~
+                    if (operationOptional == null || operationOptional.isEmpty()) {
+                        // 维持 optional 链路，不进入 GUI 操作喵~
+                        return java.util.concurrent.CompletableFuture.completedFuture(java.util.Optional.<BackpackOperation>empty());
+                    }
+                    // 保存 operation，之后 GUI 关闭成功才会在 provider 侧激活 token 喵~
+                    BackpackOperation operation = operationOptional.get();
+                    // 异步保存关闭目标 GUI 喵~
+                    return asyncAdapter.saveAndCloseOpenGuiAsync(operation).thenCompose(failure -> {
+                        // GUI 冻结未成功时释放预约，禁止 load 或 mutation 喵~
+                        if (failure != BackpackOperationFailure.NONE) {
+                            // 释放尚未激活或已部分激活的 operation 喵~
+                            return asyncAdapter.finishOperationAsync(operation)
+                                    .thenApply(ignored -> java.util.Optional.<BackpackOperation>empty());
+                        }
+                        // 只有 GUI 关闭完成后才允许下一 tick 执行 readiness 与 snapshot 读取喵~
+                        return java.util.concurrent.CompletableFuture.completedFuture(java.util.Optional.of(operation));
+                    });
+                }).whenComplete((preparedOperation, failure) -> Bukkit.getScheduler().runTask(plugin, () -> {
+                    // 喵~防御：插件停用、玩家离线或异步失败时不得创建后继任务喵~
+                    if (!plugin.isEnabled() || failure != null || preparedOperation == null || preparedOperation.isEmpty()
+                            || !player.isOnline() || player.isDead()) {
+                        // 异步阶段已有 operation 时必须释放 token 或 reservation，避免目标永久锁定喵~
+                        if (preparedOperation != null && preparedOperation.isPresent()) {
+                            // 释放玩家离线或插件停用时遗留的 v2 operation 喵~
+                            asyncAdapter.finishOperationAsync(preparedOperation.get());
+                        }
+                        // 仅在线玩家接收保守取消提示喵~
+                        if (player.isOnline()) {
+                            // 提示异步预备未完成喵~
+                            plugin.getMessageService().sendCancelled(player);
+                        }
+                        // 结束失败预备流程喵~
+                        return;
+                    }
+                    // 读取已保存关闭 GUI 后仍归当前任务拥有的 operation 喵~
+                    BackpackOperation operation = preparedOperation.get();
+                    // 下一 tick 再确认 GUI 关闭，避免 close event 延迟或其他插件取消关闭喵~
+                    Bukkit.getScheduler().runTask(plugin, () -> asyncAdapter.confirmExternalOperationReadyAsync(operation)
+                            .thenCompose(readinessFailure -> {
+                                // readiness 失败时释放 token，禁止读取或写入背包喵~
+                                if (readinessFailure != BackpackOperationFailure.NONE) {
+                                    // 返回空 snapshot，完成回调统一取消喵~
+                                    return asyncAdapter.finishOperationAsync(operation)
+                                            .thenApply(ignored -> java.util.Optional.<BackpackSnapshot>empty());
+                                }
+                                // actor load 不访问 Bukkit，快照 DTO 解码由 adapter 投递主线程喵~
+                                return asyncAdapter.loadSnapshotAsync(playerId,
+                                        runnable -> Bukkit.getScheduler().runTask(plugin, runnable));
+                            }).whenComplete((snapshotOptional, snapshotFailure) -> Bukkit.getScheduler().runTask(plugin, () -> {
+                                // 喵~防御：插件、玩家、操作或快照任一失效时释放固定 backend 会话喵~
+                                if (!plugin.isEnabled() || snapshotFailure != null || snapshotOptional == null
+                                        || snapshotOptional.isEmpty() || !player.isOnline() || player.isDead()) {
+                                    // 尝试释放所有失败出口仍持有的 v2 token 喵~
+                                    asyncAdapter.finishOperationAsync(operation);
+                                    // 仅在线玩家接收取消提示喵~
+                                    if (player.isOnline()) {
+                                        // 提示异步快照未建立喵~
+                                        plugin.getMessageService().sendCancelled(player);
+                                    }
+                                    // 结束失败路径喵~
+                                    return;
+                                }
+                                // 使用 v2 adapter 构造固定 backend context，后续 mutation 禁止切回 v1 喵~
+                                PlayerBackpackTaskContext context = new PlayerBackpackTaskContext(asyncAdapter, operation,
+                                        snapshotOptional.get());
+                                // 注册任务级 context，拒绝同一玩家并发会话喵~
+                                if (!playerBackpackTaskContexts.register(playerId, context)) {
+                                    // 释放未注册 context 的 v2 operation 喵~
+                                    context.close();
+                                    // 结束冲突路径喵~
+                                    return;
+                                }
+                                // 创建实际 AutoChest 扫描与跨域任务喵~
+                                afterFreeze.run();
+                            })));
+                }));
     }
 
     // ===== player container preferences =====

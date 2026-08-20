@@ -77,6 +77,12 @@ public final class PlayerBackpackHook implements Listener {
         return asyncApi;
     }
 
+    // 创建当前会话使用的 v2 异步 adapter，provider 缺失时返回空值喵~
+    public PlayerBackpackAsyncAdapter asyncAdapter() {
+        // 喵~防御：只读或未就绪 provider 不得创建可写 backend 喵~
+        return asyncApi == null ? null : new PlayerBackpackAsyncAdapter(asyncApi, logger);
+    }
+
     public String unavailableReason() {
         return unavailableReason == null ? "" : unavailableReason;
     }
