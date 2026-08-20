@@ -45,9 +45,29 @@ public final class PlayerBackpackTaskContexts {
         return expectedContext.bindTask(taskToken, sessionEpoch);
     }
 
+    // 将 pending operation 原子转移为完整 context，禁止停服释放夹在两步之间喵~
+    public synchronized boolean adoptPending(UUID playerUuid, BackpackOperation operation,
+                                              PlayerBackpackTaskContext context) {
+        // 喵~防御：任一身份缺失时拒绝转移，避免产生无法释放资源喵~
+        if (playerUuid == null || operation == null || context == null || !acceptingRegistrations.get()) {
+            return false;
+        }
+        // 只有相同 operation 仍处于 pending 才能完成所有权转移喵~
+        PendingOperation pendingOperation = pendingOperations.get(playerUuid);
+        if (pendingOperation == null || !pendingOperation.operation().equals(operation)) {
+            return false;
+        }
+        // CAS 登记完整 context，拒绝覆盖其他任务已持有资源喵~
+        if (contexts.putIfAbsent(playerUuid, context) != null) {
+            return false;
+        }
+        // context 登记成功后在同一锁内移除 pending，生命周期释放无法插入中间喵~
+        pendingOperations.remove(playerUuid, pendingOperation);
+        return true;
+    }
+
     // 查询玩家当前任务上下文喵~
     public PlayerBackpackTaskContext get(UUID playerUuid) {
-        // 喵~防御：空 UUID 没有可查询资源喵~
         if (playerUuid == null) {
             // 返回空上下文喵~
             return null;

@@ -520,9 +520,9 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                                 // 使用 v2 adapter 构造固定 backend context，后续 mutation 禁止切回 v1 喵~
                                 PlayerBackpackTaskContext context = new PlayerBackpackTaskContext(asyncAdapter, operation,
                                         snapshotOptional.get());
-            // 注册任务级 context，拒绝同一玩家并发会话喵~
-                                if (!playerBackpackTaskContexts.register(playerId, context)) {
-                                    // 释放未注册 context 的 v2 operation 喵~
+                                // 原子转移 pending operation 与完整 context，避免停服竞态产生资源空窗喵~
+                                if (!playerBackpackTaskContexts.adoptPending(playerId, operation, context)) {
+                                    // 转移失败时关闭未登记 context 并释放 operation 喵~
                                     context.close();
                                     // 结束冲突路径喵~
                                     return;
