@@ -70,6 +70,12 @@ public final class CrossStorageMutationCoordinator {
     // 将 PlayerBackpack 来源扣除后写入 Bukkit 容器目标喵~
     public Result deposit(PlayerBackpackTaskContext context, Inventory containerInventory,
                           int containerSlot, int logicalSlot, int amount) {
+        // 喵~防御：v2 backend 尚未接入跨 tick coordinator，禁止误走 v1 同步写路径喵~
+        if (context != null && context.usesAsyncBackend()) {
+            // 返回不可恢复结果，让上层立即终止任务而不触碰 Bukkit 或切换 provider 喵~
+            logger.severe("[AutoChest] v2 async backend 尚未接入跨域 coordinator，拒绝同步 mutation 喵~");
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
         // 喵~防御：上下文、容器和槽位数量必须有效喵~
         if (!isValidRequest(context, containerInventory, containerSlot, logicalSlot, amount)) {
             // 返回未提交结果喵~
@@ -193,6 +199,12 @@ public final class CrossStorageMutationCoordinator {
     // 从 Bukkit 容器来源扣除后增加 PlayerBackpack 目标喵~
     public Result restock(PlayerBackpackTaskContext context, Inventory containerInventory,
                           int containerSlot, int logicalSlot, int amount) {
+        // 喵~防御：v2 backend 尚未接入跨 tick coordinator，禁止误走 v1 同步写路径喵~
+        if (context != null && context.usesAsyncBackend()) {
+            // 返回不可恢复结果，让上层立即终止任务而不触碰 Bukkit 或切换 provider 喵~
+            logger.severe("[AutoChest] v2 async backend 尚未接入跨域 coordinator，拒绝同步 mutation 喵~");
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
+        }
         // 喵~防御：上下文、容器和槽位数量必须有效喵~
         if (!isValidRequest(context, containerInventory, containerSlot, logicalSlot, amount)) {
             // 返回未提交结果喵~
