@@ -503,8 +503,6 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                     }
                     // 读取已保存关闭 GUI 后仍归当前任务拥有的 operation 喵~
                     BackpackOperation operation = preparedOperation.get();
-                    // 预备 operation 已转移给完整 context，先移除预备资源登记喵~
-                    playerBackpackTaskContexts.removePending(playerId, operation);
                     // 下一 tick 再确认 GUI 关闭，避免 close event 延迟或其他插件取消关闭喵~
                     Bukkit.getScheduler().runTask(plugin, () -> asyncAdapter.confirmExternalOperationReadyAsync(operation)
                             .thenCompose(readinessFailure -> {
@@ -531,7 +529,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                                     // 结束失败路径喵~
                                     return;
                                 }
-                                // 使用 v2 adapter 构造固定 backend context，后续 mutation 禁止切回 v1 喵~
+                        // 使用 v2 adapter 构造固定 backend context，后续 mutation 禁止切回 v1 喵~
                                 PlayerBackpackTaskContext context = new PlayerBackpackTaskContext(asyncAdapter, operation,
                                         snapshotOptional.get());
                                 // 原子转移 pending operation 与完整 context，避免停服竞态产生资源空窗喵~
