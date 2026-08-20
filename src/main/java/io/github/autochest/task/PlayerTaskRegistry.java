@@ -93,15 +93,22 @@ public class PlayerTaskRegistry {
      * @param playerUuid 玩家 UUID
      * @param token      任务令牌
      */
-    public void release(UUID playerUuid, long token) {
+    public boolean release(UUID playerUuid, long token) {
+        // 记录 token 是否匹配当前任务，供调用方决定是否释放关联外部资源喵~
+        java.util.concurrent.atomic.AtomicBoolean released = new java.util.concurrent.atomic.AtomicBoolean(false);
+        // 仅在 token 匹配时移除当前任务，防止旧 callback 触碰新任务喵~
         activeTasks.compute(playerUuid, (k, existing) -> {
             if (existing != null && existing.getToken() == token) {
-                // token 匹配才移除
+                // 标记当前任务确实由本次 callback 释放喵~
+                released.set(true);
+                // 移除匹配任务喵~
                 return null;
             }
-            // token 不匹配，保留现有任务不动
+            // token 不匹配时保留当前新任务喵~
             return existing;
         });
+        // 返回释放结果，阻止旧 callback 误释放新任务外部 context 喵~
+        return released.get();
     }
 
     /**

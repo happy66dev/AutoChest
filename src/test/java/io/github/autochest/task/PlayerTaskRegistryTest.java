@@ -75,8 +75,16 @@ class PlayerTaskRegistryTest {
     }
 
     /**
-     * invalidate 后 isValid 应返回 false
+     * 错误 token 释放必须返回 false，供外部资源释放路径阻止误释放。
      */
+    @Test
+    void release_wrongToken_returnsFalse() {
+        PlayerTask task = acquireTask(playerUuid).orElseThrow();
+
+        assertFalse(registry.release(playerUuid, task.getToken() + 1));
+        assertTrue(registry.isValid(task));
+    }
+
     @Test
     void invalidate_makesTaskInvalid() {
         PlayerTask task = acquireTask(playerUuid).orElseThrow();

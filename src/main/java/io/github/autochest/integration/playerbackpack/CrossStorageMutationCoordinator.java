@@ -450,6 +450,11 @@ public final class CrossStorageMutationCoordinator {
                                                      int amount, UUID originalMutationId,
                                                      BackpackMutationDirection direction, long appliedRevision,
                                                      Executor mainThreadExecutor) {
+        // 喵~防御：补偿开始前重新确认 context，关闭后禁止读取或写入 Bukkit 容器喵~
+        if (context == null || !context.isOpen()) {
+            // 返回不可恢复状态，交给 durable journal/reconcile 处理喵~
+            return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
+        }
         // 仅当容器仍是事务 after-image 时才允许恢复，第三种状态必须人工 reconcile 喵~
         if (!sameSlot(inventory.getItem(containerSlot), containerBefore)) {
             if (!sameSlot(inventory.getItem(containerSlot), containerAfter)) {
@@ -532,7 +537,16 @@ public final class CrossStorageMutationCoordinator {
                                                         ItemStack sourceBefore, ItemStack sourceAfter,
                                                         BackpackMutationResult mutationResult,
                                                         Executor mainThreadExecutor) {
+        // 喵~防御：restock 迟到 callback 在任何 snapshot/补偿前都必须确认会话仍打开喵~
+        if (context == null || !context.isOpen()) {
+            return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
+        }
         if (mutationResult == null || mutationResult.status() == BackpackMutationResult.Status.RECONCILIATION_REQUIRED) {
+            return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
+        }
+        if (mutationResult.status() == BackpackMutationResult.Status.REVISION_CONFLICT) {
+            // revision 冲突代表背包基线已过期，禁止把本次操作当作普通跳过喵~
+            logger.warning("[AutoChest] PlayerBackpack revision conflict，停止当前跨域 mutation 喵~");
             return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
         }
         if (!mutationResult.applied()) {

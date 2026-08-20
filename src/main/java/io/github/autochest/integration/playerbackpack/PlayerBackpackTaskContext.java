@@ -8,6 +8,12 @@ public final class PlayerBackpackTaskContext implements AutoCloseable {
     private final BackpackOperation operation;
     private BackpackSnapshot snapshot;
     private final AtomicBoolean closed = new AtomicBoolean(false);
+    // 保存绑定的 AutoChest 任务 token，防止旧任务回调释放新任务上下文喵~
+    private long taskToken;
+    // 保存绑定任务创建时的 session epoch，防止重连后的旧回调越权喵~
+    private int taskSessionEpoch;
+    // 标记当前 context 是否已经绑定 AutoChest 任务喵~
+    private boolean taskBound;
 
     public PlayerBackpackTaskContext(PlayerBackpackAdapter adapter, BackpackOperation operation, BackpackSnapshot snapshot) {
         this(adapter, null, operation, snapshot);
@@ -56,6 +62,24 @@ public final class PlayerBackpackTaskContext implements AutoCloseable {
 
     public boolean isOpen() {
         return !closed.get();
+    }
+
+    // 将外部 operation 归属到唯一 AutoChest task，重复绑定或关闭后拒绝喵~
+    public synchronized boolean bindTask(long expectedTaskToken, int expectedSessionEpoch) {
+        // 喵~防御：已关闭或已绑定的 context 不能被迟到 callback 重复归属喵~
+        if (closed.get() || taskBound) {
+            return false;
+        }
+        // 保存不可变任务身份，供所有读取和释放路径精确比较喵~
+        taskToken = expectedTaskToken;
+        taskSessionEpoch = expectedSessionEpoch;
+        taskBound = true;
+        return true;
+    }
+
+    // 检查 context 是否精确属于指定 task，UUID 相同不能视为相同任务喵~
+    public synchronized boolean belongsTo(long expectedTaskToken, int expectedSessionEpoch) {
+        return taskBound && taskToken == expectedTaskToken && taskSessionEpoch == expectedSessionEpoch;
     }
 
     PlayerBackpackAdapter adapter() {

@@ -2,7 +2,6 @@ package io.github.autochest.integration.playerbackpack;
 
 // 导入 UUID 作为玩家任务资源键喵~
 import java.util.UUID;
-// 导入并发映射支持生命周期事件与任务回调安全竞争喵~
 import java.util.concurrent.ConcurrentHashMap;
 
 // 管理每名玩家当前 AutoChest 任务持有的 PlayerBackpack 会话喵~
@@ -12,16 +11,38 @@ public final class PlayerBackpackTaskContexts {
     private final ConcurrentHashMap<UUID, PlayerBackpackTaskContext> contexts = new ConcurrentHashMap<>();
     // 保存尚未完成 context 注册的预备 operation，覆盖停服竞态喵~
     private final ConcurrentHashMap<UUID, PendingOperation> pendingOperations = new ConcurrentHashMap<>();
+    // 标识插件是否已关闭资源入口，阻止迟到 callback 再登记 context 喵~
+    private final java.util.concurrent.atomic.AtomicBoolean acceptingRegistrations =
+            new java.util.concurrent.atomic.AtomicBoolean(true);
 
     // 为玩家登记唯一 PlayerBackpack 任务上下文喵~
-    public boolean register(UUID playerUuid, PlayerBackpackTaskContext context) {
+    public synchronized boolean register(UUID playerUuid, PlayerBackpackTaskContext context) {
         // 喵~防御：玩家或上下文为空时拒绝登记喵~
         if (playerUuid == null || context == null) {
             // 返回失败避免产生无法释放的资源喵~
             return false;
         }
+        // 喵~防御：停服后拒绝迟到 callback 登记新会话喵~
+        if (!acceptingRegistrations.get()) {
+            return false;
+        }
         // CAS 登记防止并发命令覆盖旧会话喵~
         return contexts.putIfAbsent(playerUuid, context) == null;
+    }
+
+    // 将已注册 context 原子绑定到指定 AutoChest task 身份喵~
+    public synchronized boolean bind(UUID playerUuid, PlayerBackpackTaskContext expectedContext,
+                                      long taskToken, int sessionEpoch) {
+        // 喵~防御：参数缺失时拒绝绑定，避免产生无法验证的归属喵~
+        if (playerUuid == null || expectedContext == null) {
+            return false;
+        }
+        // 仅当前 map 中仍是同一引用时允许绑定，防止迟到 callback 越权喵~
+        if (contexts.get(playerUuid) != expectedContext) {
+            return false;
+        }
+        // 由 context 内部锁保证绑定身份不可重复修改喵~
+        return expectedContext.bindTask(taskToken, sessionEpoch);
     }
 
     // 查询玩家当前任务上下文喵~
@@ -50,9 +71,13 @@ public final class PlayerBackpackTaskContexts {
     }
 
     // 登记尚未创建完整 context 的异步 operation，停服时统一释放喵~
-    public boolean registerPending(UUID playerUuid, PlayerBackpackAsyncAdapter asyncAdapter, BackpackOperation operation) {
+    public synchronized boolean registerPending(UUID playerUuid, PlayerBackpackAsyncAdapter asyncAdapter, BackpackOperation operation) {
         // 喵~防御：预备资源缺失时拒绝登记，避免无法释放的幽灵 token 喵~
         if (playerUuid == null || asyncAdapter == null || operation == null) {
+            return false;
+        }
+        // 喵~防御：停服后拒绝迟到 callback 登记预备 operation 喵~
+        if (!acceptingRegistrations.get()) {
             return false;
         }
         // 使用玩家 UUID 唯一覆盖保护，避免不同预备流程互相释放喵~
@@ -89,12 +114,17 @@ public final class PlayerBackpackTaskContexts {
         }
     }
 
-    // 插件禁用时释放所有完整上下文与预备 operation 喵~
-    public void releaseAll() {
-        // 遍历完整上下文并按引用条件释放喵~
-        contexts.forEach(this::release);
-        // 遍历预备 operation 并按玩家 UUID 释放喵~
-        pendingOperations.forEach((playerUuid, pendingOperation) -> releasePlayer(playerUuid));
+    // 插件禁用时关闭注册入口并释放所有完整上下文与预备 operation 喵~
+    public synchronized void releaseAll() {
+        // 先关闭入口，确保弱一致遍历期间不会出现新的 context 或 pending operation 喵~
+        acceptingRegistrations.set(false);
+        // 循环直到两个并发表为空，覆盖进入关闭闸门前已经开始的登记喵~
+        while (!contexts.isEmpty() || !pendingOperations.isEmpty()) {
+            // 遍历完整上下文并按引用条件释放喵~
+            contexts.forEach(this::release);
+            // 遍历预备 operation 并按玩家 UUID 释放喵~
+            pendingOperations.forEach((playerUuid, pendingOperation) -> releasePlayer(playerUuid));
+        }
     }
 
     // 封装异步预备资源，使用 operation 相等性保证条件移除喵~

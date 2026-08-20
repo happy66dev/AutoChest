@@ -234,6 +234,20 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         }
         // 取得已注册的 AutoChest 任务喵~
         PlayerTask task = taskOpt.get();
+        // 读取当前预备阶段注册的 PlayerBackpack context 喵~
+        PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(player.getUniqueId());
+        // 喵~防御：跨域 context 缺失或不属于本次 task 时立即释放，禁止孤立 operation 继续喵~
+        if (context == null || !playerBackpackTaskContexts.bind(player.getUniqueId(), context,
+                task.getToken(), task.getSessionEpoch())) {
+            // 释放刚创建但尚未执行的 AutoChest task 喵~
+            registry.release(task.getPlayerUuid(), task.getToken());
+            // 仅按引用释放本次 context，避免影响其他任务资源喵~
+            playerBackpackTaskContexts.release(player.getUniqueId(), context);
+            // 向仍在线玩家报告保守取消喵~
+            plugin.getMessageService().sendCancelled(player);
+            // 停止后续扫描启动喵~
+            return;
+        }
         // 命令真正接受后消费冷却喵~
         cooldownService.record(player.getUniqueId(), CooldownService.OperationType.DEPOSIT);
         // 提示扫描开始喵~
@@ -321,6 +335,20 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         }
         // 取得已注册任务喵~
         PlayerTask task = taskOpt.get();
+        // 读取并绑定本次任务专属 PlayerBackpack context 喵~
+        PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(player.getUniqueId());
+        // 喵~防御：context 缺失或归属绑定失败时释放任务，禁止未绑定双域写入喵~
+        if (context == null || !playerBackpackTaskContexts.bind(player.getUniqueId(), context,
+                task.getToken(), task.getSessionEpoch())) {
+            // 释放刚创建的任务锁喵~
+            registry.release(task.getPlayerUuid(), task.getToken());
+            // 按引用释放本次外部 context 喵~
+            playerBackpackTaskContexts.release(player.getUniqueId(), context);
+            // 通知玩家本次任务取消喵~
+            plugin.getMessageService().sendCancelled(player);
+            // 终止扫描启动喵~
+            return;
+        }
         // 命令接受后消费冷却喵~
         cooldownService.record(player.getUniqueId(), CooldownService.OperationType.RESTOCK);
         // 开始追踪原版背包白名单喵~
@@ -492,7 +520,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                                 // 使用 v2 adapter 构造固定 backend context，后续 mutation 禁止切回 v1 喵~
                                 PlayerBackpackTaskContext context = new PlayerBackpackTaskContext(asyncAdapter, operation,
                                         snapshotOptional.get());
-                                // 注册任务级 context，拒绝同一玩家并发会话喵~
+            // 注册任务级 context，拒绝同一玩家并发会话喵~
                                 if (!playerBackpackTaskContexts.register(playerId, context)) {
                                     // 释放未注册 context 的 v2 operation 喵~
                                     context.close();
@@ -1059,12 +1087,14 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
      * @param task 要释放的任务
      */
     private void finishTask(PlayerTask task) {
-        // 释放 AutoChest 任务锁，token 不匹配时不会影响新任务喵~
-        registry.release(task.getPlayerUuid(), task.getToken());
-        // 获取当前任务关联的 PlayerBackpack 上下文喵~
+        // 仅 token 匹配并实际释放当前任务时才允许释放关联的 PlayerBackpack context 喵~
+        if (!registry.release(task.getPlayerUuid(), task.getToken())) {
+            return;
+        }
+        // 仅 token/epoch 同时匹配时才释放关联 PlayerBackpack context 喵~
         PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(task.getPlayerUuid());
-        // 存在跨域会话时按引用条件幂等释放喵~
-        if (context != null) {
+        // 喵~防御：旧任务 callback 不得读取或关闭新 session context 喵~
+        if (context != null && context.belongsTo(task.getToken(), task.getSessionEpoch())) {
             // 释放 PlayerBackpack 目标锁喵~
             playerBackpackTaskContexts.release(task.getPlayerUuid(), context);
         }
