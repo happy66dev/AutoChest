@@ -61,6 +61,8 @@ public final class CrossStorageMutationCoordinator {
 
     // 保存不可恢复审计日志喵~
     private final Logger logger;
+    // 限制单次 mutation 的 authoritative reload/replan 次数，避免冲突风暴无限递归喵~
+    private static final int MAX_CONFLICT_REPLANS = 2;
 
     // 创建协调器并校验日志依赖喵~
     public CrossStorageMutationCoordinator(Logger logger) {
@@ -335,6 +337,16 @@ public final class CrossStorageMutationCoordinator {
     public CompletionStage<Result> depositAsync(PlayerBackpackTaskContext context, Inventory containerInventory,
                                                 int containerSlot, int logicalSlot, int amount,
                                                 Executor mainThreadExecutor) {
+        // 从零次冲突重规划开始执行异步 deposit 喵~
+        return depositAsyncAttempt(context, containerInventory, containerSlot, logicalSlot, amount,
+                mainThreadExecutor, 0);
+    }
+
+    // 执行单次异步 deposit 尝试，冲突时由 finish 方法触发下一次重规划喵~
+    private CompletionStage<Result> depositAsyncAttempt(PlayerBackpackTaskContext context,
+                                                        Inventory containerInventory, int containerSlot,
+                                                        int logicalSlot, int amount, Executor mainThreadExecutor,
+                                                        int conflictReplanCount) {
         // 喵~防御：缺少 async context 或主线程执行器时拒绝同步回退喵~
         if (context == null || !context.usesAsyncBackend() || mainThreadExecutor == null
                 || !isValidRequest(context, containerInventory, containerSlot, logicalSlot, amount)) {
@@ -376,7 +388,7 @@ public final class CrossStorageMutationCoordinator {
                     return asyncAdapter.applyMutationAsync(context.operation(), request, mainThreadExecutor)
                             .thenCompose(applied -> finishAsyncDeposit(context, containerInventory, containerSlot,
                                     logicalSlot, amount, mutationId, sourceBefore, sourceAfter, targetBefore, targetAfter,
-                                    applied, mainThreadExecutor));
+                                    applied, mainThreadExecutor, conflictReplanCount));
                 }, mainThreadExecutor)
                 .exceptionally(failure -> {
                     logger.log(Level.SEVERE, "[AutoChest] 异步 deposit mutation 失败，必须人工 reconcile 喵~", failure);
@@ -390,7 +402,8 @@ public final class CrossStorageMutationCoordinator {
                                                         UUID mutationId, ItemStack sourceBefore, ItemStack sourceAfter,
                                                         ItemStack targetBefore, ItemStack targetAfter,
                                                         BackpackMutationResult mutationResult,
-                                                        Executor mainThreadExecutor) {
+                                                        Executor mainThreadExecutor,
+                                                        int conflictReplanCount) {
         // 喵~防御：异步结果回来时会话可能已经被退出、停服或 provider 撤销关闭喵~
         if (context == null || !context.isOpen()) {
             return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
@@ -399,8 +412,20 @@ public final class CrossStorageMutationCoordinator {
             return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
         }
         if (mutationResult.status() == BackpackMutationResult.Status.REVISION_CONFLICT) {
-            // revision 冲突代表背包基线已过期，禁止把本次操作当作普通跳过喵~
-            logger.warning("[AutoChest] PlayerBackpack revision conflict，停止当前跨域 mutation 喵~");
+            // 仅在尚未发生 Bukkit 写入时重新加载 authoritative snapshot 并重规划喵~
+            if (conflictReplanCount < MAX_CONFLICT_REPLANS && context.isOpen()) {
+                return context.asyncAdapter().loadSnapshotAsync(context.operation().targetId(), mainThreadExecutor)
+                        .thenCompose(latestSnapshot -> {
+                            if (latestSnapshot.isEmpty() || !context.advance(latestSnapshot.get())) {
+                                return CompletableFuture.completedFuture(
+                                        new Result(Status.FAILED_UNRECOVERABLE, 0));
+                            }
+                            return depositAsyncAttempt(context, inventory, containerSlot, logicalSlot, amount,
+                                    mainThreadExecutor, conflictReplanCount + 1);
+                        });
+            }
+            // 超过重规划上限时返回明确不可恢复状态，阻止继续写容器喵~
+            logger.warning("[AutoChest] PlayerBackpack revision conflict，重规划次数已耗尽喵~");
             return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
         }
         // provider 明确未应用时不执行补偿，保留两侧 before-image 喵~
@@ -484,6 +509,16 @@ public final class CrossStorageMutationCoordinator {
     public CompletionStage<Result> restockAsync(PlayerBackpackTaskContext context, Inventory containerInventory,
                                                 int containerSlot, int logicalSlot, int amount,
                                                 Executor mainThreadExecutor) {
+        // 从零次冲突重规划开始执行异步 restock 喵~
+        return restockAsyncAttempt(context, containerInventory, containerSlot, logicalSlot, amount,
+                mainThreadExecutor, 0);
+    }
+
+    // 执行单次异步 restock 尝试，冲突时重新读取 authoritative snapshot 喵~
+    private CompletionStage<Result> restockAsyncAttempt(PlayerBackpackTaskContext context,
+                                                        Inventory containerInventory, int containerSlot,
+                                                        int logicalSlot, int amount, Executor mainThreadExecutor,
+                                                        int conflictReplanCount) {
         // 喵~防御：仅固定 async backend 可进入异步 restock，其他输入 fail-closed 喵~
         if (context == null || !context.usesAsyncBackend() || mainThreadExecutor == null
                 || !isValidRequest(context, containerInventory, containerSlot, logicalSlot, amount)) {
@@ -522,7 +557,8 @@ public final class CrossStorageMutationCoordinator {
                     return asyncAdapter.applyMutationAsync(context.operation(), request, mainThreadExecutor)
                             .thenCompose(applied -> finishAsyncRestock(context, containerInventory, containerSlot,
                                     logicalSlot, amount, mutationId, targetBefore, targetAfter,
-                                    sourceBefore, sourceAfter, applied, mainThreadExecutor));
+                                    sourceBefore, sourceAfter, applied, mainThreadExecutor,
+                                    conflictReplanCount));
                 }, mainThreadExecutor)
                 .exceptionally(failure -> {
                     logger.log(Level.SEVERE, "[AutoChest] 异步 restock mutation 失败，必须人工 reconcile 喵~", failure);
@@ -536,7 +572,8 @@ public final class CrossStorageMutationCoordinator {
                                                         UUID mutationId, ItemStack targetBefore, ItemStack targetAfter,
                                                         ItemStack sourceBefore, ItemStack sourceAfter,
                                                         BackpackMutationResult mutationResult,
-                                                        Executor mainThreadExecutor) {
+                                                        Executor mainThreadExecutor,
+                                                        int conflictReplanCount) {
         // 喵~防御：restock 迟到 callback 在任何 snapshot/补偿前都必须确认会话仍打开喵~
         if (context == null || !context.isOpen()) {
             return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
@@ -545,8 +582,20 @@ public final class CrossStorageMutationCoordinator {
             return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
         }
         if (mutationResult.status() == BackpackMutationResult.Status.REVISION_CONFLICT) {
-            // revision 冲突代表背包基线已过期，禁止把本次操作当作普通跳过喵~
-            logger.warning("[AutoChest] PlayerBackpack revision conflict，停止当前跨域 mutation 喵~");
+            // 仅在尚未发生 Bukkit 写入时重新加载 authoritative snapshot 并重规划喵~
+            if (conflictReplanCount < MAX_CONFLICT_REPLANS && context.isOpen()) {
+                return context.asyncAdapter().loadSnapshotAsync(context.operation().targetId(), mainThreadExecutor)
+                        .thenCompose(latestSnapshot -> {
+                            if (latestSnapshot.isEmpty() || !context.advance(latestSnapshot.get())) {
+                                return CompletableFuture.completedFuture(
+                                        new Result(Status.FAILED_UNRECOVERABLE, 0));
+                            }
+                            return restockAsyncAttempt(context, inventory, containerSlot, logicalSlot, amount,
+                                    mainThreadExecutor, conflictReplanCount + 1);
+                        });
+            }
+            // 超过重规划上限时返回明确不可恢复状态，阻止继续写容器喵~
+            logger.warning("[AutoChest] PlayerBackpack revision conflict，重规划次数已耗尽喵~");
             return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
         }
         if (!mutationResult.applied()) {
