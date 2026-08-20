@@ -90,18 +90,26 @@ public final class PlayerBackpackTaskContexts {
         }
     }
 
-    // 登记尚未创建完整 context 的异步 operation，停服时统一释放喵~
-    public synchronized boolean registerPending(UUID playerUuid, PlayerBackpackAsyncAdapter asyncAdapter, BackpackOperation operation) {
-        // 喵~防御：预备资源缺失时拒绝登记，避免无法释放的幽灵 token 喵~
-        if (playerUuid == null || asyncAdapter == null || operation == null) {
-            return false;
-        }
-        // 喵~防御：停服后拒绝迟到 callback 登记预备 operation 喵~
-        if (!acceptingRegistrations.get()) {
+    // 登记尚未创建完整 context 的 v1 operation，停服时统一释放喵~
+    public synchronized boolean registerPending(UUID playerUuid, PlayerBackpackAdapter adapter,
+                                                  BackpackOperation operation) {
+        // 喵~防御：预备资源缺失时拒绝登记，避免产生无法释放的 v1 token 喵~
+        if (playerUuid == null || adapter == null || operation == null || !acceptingRegistrations.get()) {
             return false;
         }
         // 使用玩家 UUID 唯一覆盖保护，避免不同预备流程互相释放喵~
-        return pendingOperations.putIfAbsent(playerUuid, new PendingOperation(asyncAdapter, operation)) == null;
+        return pendingOperations.putIfAbsent(playerUuid, PendingOperation.forSync(adapter, operation)) == null;
+    }
+
+    // 登记尚未创建完整 context 的 v2 operation，停服时统一释放喵~
+    public synchronized boolean registerPending(UUID playerUuid, PlayerBackpackAsyncAdapter asyncAdapter,
+                                                  BackpackOperation operation) {
+        // 喵~防御：预备资源缺失或关闭后拒绝登记，避免产生无法释放的 v2 token 喵~
+        if (playerUuid == null || asyncAdapter == null || operation == null || !acceptingRegistrations.get()) {
+            return false;
+        }
+        // 使用玩家 UUID 唯一覆盖保护，避免不同预备流程互相释放喵~
+        return pendingOperations.putIfAbsent(playerUuid, PendingOperation.forAsync(asyncAdapter, operation)) == null;
     }
 
     // 移除指定 operation 的预备登记，供成功注册 context 或异常出口调用喵~
@@ -111,7 +119,7 @@ public final class PlayerBackpackTaskContexts {
             return;
         }
         // 仅引用相同 operation 才允许移除，防止迟到回调误删新预备流程喵~
-        pendingOperations.remove(playerUuid, new PendingOperation(null, operation));
+        pendingOperations.remove(playerUuid, new PendingOperation(null, null, operation));
     }
 
     // 释放指定玩家所有已登记资源，覆盖离线、停服和 provider 撤销喵~
@@ -130,7 +138,12 @@ public final class PlayerBackpackTaskContexts {
         PendingOperation pendingOperation = pendingOperations.remove(playerUuid);
         // 有预备 operation 时释放 provider reservation 喵~
         if (pendingOperation != null) {
-            pendingOperation.asyncAdapter().finishOperationAsync(pendingOperation.operation());
+            // v1 operation 使用同步 finish，v2 operation 使用异步 finish，保持固定 backend 归属喵~
+            if (pendingOperation.adapter() != null) {
+                pendingOperation.adapter().finish(pendingOperation.operation());
+            } else if (pendingOperation.asyncAdapter() != null) {
+                pendingOperation.asyncAdapter().finishOperationAsync(pendingOperation.operation());
+            }
         }
     }
 
@@ -147,8 +160,20 @@ public final class PlayerBackpackTaskContexts {
         }
     }
 
-    // 封装异步预备资源，使用 operation 相等性保证条件移除喵~
-    private record PendingOperation(PlayerBackpackAsyncAdapter asyncAdapter, BackpackOperation operation) {
+    // 封装预备资源，使用 operation 相等性保证条件移除喵~
+    private record PendingOperation(PlayerBackpackAdapter adapter,
+                                    PlayerBackpackAsyncAdapter asyncAdapter,
+                                    BackpackOperation operation) {
+        // 创建 v1 同步 adapter 预备资源喵~
+        private static PendingOperation forSync(PlayerBackpackAdapter adapter, BackpackOperation operation) {
+            return new PendingOperation(adapter, null, operation);
+        }
+
+        // 创建 v2 异步 adapter 预备资源喵~
+        private static PendingOperation forAsync(PlayerBackpackAsyncAdapter asyncAdapter, BackpackOperation operation) {
+            return new PendingOperation(null, asyncAdapter, operation);
+        }
+
         // 自定义相等判断只比较 operation，允许 removePending 不持有 adapter 引用喵~
         @Override
         public boolean equals(Object other) {

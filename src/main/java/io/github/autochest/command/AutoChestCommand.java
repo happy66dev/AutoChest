@@ -237,7 +237,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         // 读取当前预备阶段注册的 PlayerBackpack context 喵~
         PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(player.getUniqueId());
         // 喵~防御：跨域 context 缺失或不属于本次 task 时立即释放，禁止孤立 operation 继续喵~
-        if (context == null || !playerBackpackTaskContexts.bind(player.getUniqueId(), context,
+        if (context != null && !playerBackpackTaskContexts.bind(player.getUniqueId(), context,
                 task.getToken(), task.getSessionEpoch())) {
             // 释放刚创建但尚未执行的 AutoChest task 喵~
             registry.release(task.getPlayerUuid(), task.getToken());
@@ -338,7 +338,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         // 读取并绑定本次任务专属 PlayerBackpack context 喵~
         PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(player.getUniqueId());
         // 喵~防御：context 缺失或归属绑定失败时释放任务，禁止未绑定双域写入喵~
-        if (context == null || !playerBackpackTaskContexts.bind(player.getUniqueId(), context,
+        if (context != null && !playerBackpackTaskContexts.bind(player.getUniqueId(), context,
                 task.getToken(), task.getSessionEpoch())) {
             // 释放刚创建的任务锁喵~
             registry.release(task.getPlayerUuid(), task.getToken());
@@ -390,6 +390,13 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         }
         // 取得独占操作句柄喵~
         BackpackOperation operation = operationOptional.get();
+        // 登记 v1 operation，覆盖 freeze 到 context 注册之间的退出与停服竞态喵~
+        if (!playerBackpackTaskContexts.registerPending(player.getUniqueId(), adapter, operation)) {
+            // 登记失败时立即释放 provider operation，禁止孤立 busy token 喵~
+            adapter.finish(operation);
+            plugin.getMessageService().sendTaskConflict(player);
+            return true;
+        }
         // 保存并关闭所有相关 PlayerBackpack GUI 喵~
         BackpackOperationFailure freezeFailure = adapter.saveAndCloseOpenGui(operation);
         // 只有 NONE 表示冻结成功喵~
@@ -415,10 +422,17 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
             }
             PlayerBackpackTaskContext context = new PlayerBackpackTaskContext(
                     adapter, operation, snapshotOptional.get());
+            // 喵~防御：v1 callback 回来时 context 注册入口可能已关闭或 operation 已被生命周期释放喵~
             if (!playerBackpackTaskContexts.register(player.getUniqueId(), context)) {
+                // 从 pending 表移除本 operation，避免 releaseAll 重复释放喵~
+                playerBackpackTaskContexts.removePending(player.getUniqueId(), operation);
+                // 关闭未登记 context，幂等释放 provider token 喵~
                 context.close();
                 return;
             }
+            // v1 context 已接管 operation，移除预备资源登记喵~
+            playerBackpackTaskContexts.removePending(player.getUniqueId(), operation);
+            // 创建后续 AutoChest 任务喵~
             afterFreeze.run();
         });
         return true;
