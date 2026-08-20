@@ -368,7 +368,9 @@ public final class CrossStorageMutationCoordinator {
         return asyncAdapter.prepareMutationAsync(context.operation(), request, containerMutation, mainThreadExecutor)
                 .thenComposeAsync(preparation -> {
                     if (preparation == null || !preparation.applied()) {
-                        return CompletableFuture.<Result>completedFuture(skipped());
+                        // prepare 非 APPLIED 状态不能证明 journal 未创建，未知状态必须终止任务喵~
+                        return CompletableFuture.<Result>completedFuture(
+                                new Result(Status.FAILED_UNRECOVERABLE, 0));
                     }
                     // apply 请求仍含 Bukkit ItemStack，必须由主线程编码后提交喵~
                     return asyncAdapter.applyMutationAsync(context.operation(), request, mainThreadExecutor)
@@ -495,7 +497,9 @@ public final class CrossStorageMutationCoordinator {
         return asyncAdapter.prepareMutationAsync(context.operation(), request, containerMutation, mainThreadExecutor)
                 .thenComposeAsync(preparation -> {
                     if (preparation == null || !preparation.applied()) {
-                        return CompletableFuture.<Result>completedFuture(skipped());
+                        // prepare 非 APPLIED 状态不能证明 journal 未创建，未知状态必须终止任务喵~
+                        return CompletableFuture.<Result>completedFuture(
+                                new Result(Status.FAILED_UNRECOVERABLE, 0));
                     }
                     return asyncAdapter.applyMutationAsync(context.operation(), request, mainThreadExecutor)
                             .thenCompose(applied -> finishAsyncRestock(context, containerInventory, containerSlot,

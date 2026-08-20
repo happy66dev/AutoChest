@@ -4,6 +4,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -22,9 +23,9 @@ public final class PlayerBackpackAsyncAdapter {
     // 保存日志出口喵~
     private final Logger logger;
     // 缓存 v2 API 方法喵~
-    private final Map<String, Method> apiMethods = new HashMap<>();
-    // 缓存 v2 DTO 构造器喵~
-    private final Map<String, Constructor<?>> constructors = new HashMap<>();
+    private final Map<String, Method> apiMethods = new ConcurrentHashMap<>();
+    // 缓存 v2 DTO 构造器，线程安全支持并发异步请求喵~
+    private final Map<String, Constructor<?>> constructors = new ConcurrentHashMap<>();
 
     // 创建异步 adapter 并校验 provider 喵~
     public PlayerBackpackAsyncAdapter(Object api, Logger logger) {
@@ -263,8 +264,15 @@ public final class PlayerBackpackAsyncAdapter {
             return CompletableFuture.completedFuture(null);
         }
         try {
-            // 调用 v2 token release 方法喵~
-            return completionStage(invoke("finishOperationAsync", operation.nativeHandle())).thenApply(ignored -> null);
+            // provider stage 异常必须保留到调用方，避免提前伪造释放成功喵~
+            return completionStage(invoke("finishOperationAsync", operation.nativeHandle()))
+                    .thenApply(ignored -> (Void) null)
+                    .whenComplete((ignored, failure) -> {
+                        // 记录异步释放失败，供管理员发现 provider token 可能仍被持有喵~
+                        if (failure != null) {
+                            log(Level.SEVERE, "finishOperationAsync completion", operation.targetId(), failure);
+                        }
+                    });
         } catch (Throwable exception) {
             // 释放失败记录日志但不抛出到任务清理出口喵~
             log(Level.WARNING, "finishOperationAsync", operation.targetId(), exception);
@@ -428,25 +436,79 @@ public final class PlayerBackpackAsyncAdapter {
 
     // 查找并缓存反射方法喵~
     private Object invoke(String methodName, Object... arguments) throws ReflectiveOperationException {
-        // 根据参数数量查找唯一 v2 方法喵~
-        String key = methodName + "#" + arguments.length;
+        // 根据方法名和实际参数类型构造精确缓存键，避免重载误选喵~
+        String key = methodKey(methodName, arguments);
+        // 读取已经通过类型匹配缓存的方法喵~
         Method method = apiMethods.get(key);
+        // 首次调用时遍历 provider 的公开方法并执行参数兼容校验喵~
         if (method == null) {
             // 从 provider 类型查找公开 API 方法喵~
             for (Method candidate : api.getClass().getMethods()) {
-                if (candidate.getName().equals(methodName) && candidate.getParameterCount() == arguments.length) {
-                    method = candidate;
-                    apiMethods.put(key, candidate);
+                // 只有名称、数量和参数类型同时兼容才允许调用喵~
+                if (candidate.getName().equals(methodName)
+                        && parametersMatch(candidate.getParameterTypes(), arguments)) {
+                    // 使用并发缓存的原子 putIfAbsent 保证首次并发查找一致喵~
+                    Method previousMethod = apiMethods.putIfAbsent(key, candidate);
+                    // 复用并发线程已经发现的方法，避免覆盖不同签名喵~
+                    method = previousMethod == null ? candidate : previousMethod;
                     break;
                 }
             }
         }
-        // 喵~防御：协议缺少方法时立即失败，不回退同步 v1 喵~
+        // 喵~防御：协议缺少精确方法时立即失败，不回退同步 v1 喵~
         if (method == null) {
             throw new NoSuchMethodException(methodName);
         }
         // 调用 provider 方法并返回 CompletionStage 喵~
         return method.invoke(api, arguments);
+    }
+
+    // 构造稳定的反射方法缓存键，区分同名不同参数类型重载喵~
+    private String methodKey(String methodName, Object[] arguments) {
+        // 以方法名和参数数量作为键前缀喵~
+        StringBuilder keyBuilder = new StringBuilder(methodName).append('#').append(arguments.length);
+        // 追加每个运行时参数类型，null 使用固定标记喵~
+        for (Object argument : arguments) {
+            keyBuilder.append('#').append(argument == null ? "null" : argument.getClass().getName());
+        }
+        // 返回稳定缓存键喵~
+        return keyBuilder.toString();
+    }
+
+    // 判断反射参数是否能接收当前调用参数喵~
+    private boolean parametersMatch(Class<?>[] parameterTypes, Object[] arguments) {
+        // 参数数量不同的方法不能匹配喵~
+        if (parameterTypes.length != arguments.length) {
+            return false;
+        }
+        // 逐个校验 null 和包装类型兼容性喵~
+        for (int index = 0; index < parameterTypes.length; index++) {
+            // null 不能传给 primitive 参数喵~
+            if (arguments[index] == null && parameterTypes[index].isPrimitive()) {
+                return false;
+            }
+            // 非 null 参数必须能赋值给声明类型喵~
+            if (arguments[index] != null && !wrap(parameterTypes[index]).isInstance(arguments[index])) {
+                return false;
+            }
+        }
+        // 所有参数均兼容喵~
+        return true;
+    }
+
+    // 将 primitive 参数类型转换成包装类型喵~
+    private Class<?> wrap(Class<?> type) {
+        // 映射常用 primitive 类型喵~
+        if (type == int.class) return Integer.class;
+        if (type == long.class) return Long.class;
+        if (type == boolean.class) return Boolean.class;
+        if (type == double.class) return Double.class;
+        if (type == float.class) return Float.class;
+        if (type == short.class) return Short.class;
+        if (type == byte.class) return Byte.class;
+        if (type == char.class) return Character.class;
+        // 引用类型无需转换喵~
+        return type;
     }
 
     // 读取 DTO 属性方法喵~
@@ -470,8 +532,10 @@ public final class PlayerBackpackAsyncAdapter {
             return cached;
         }
         Constructor<?> discovered = type.getConstructor(parameterTypes);
-        constructors.put(key, discovered);
-        return discovered;
+        // 并发首次构造器查找只保留一个等价签名结果喵~
+        Constructor<?> previousConstructor = constructors.putIfAbsent(key, discovered);
+        // 返回已缓存或本次发现的构造器喵~
+        return previousConstructor == null ? discovered : previousConstructor;
     }
 
     // 创建 fail-closed mutation 结果喵~

@@ -406,6 +406,9 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         }
         // 主线程 capture 不可变玩家身份，异步 callback 不再读取易变 Player 对象喵~
         java.util.UUID playerId = player.getUniqueId();
+        // 保存已预约 operation，异常 completion 也能进入统一释放出口喵~
+        java.util.concurrent.atomic.AtomicReference<BackpackOperation> begunOperation =
+                new java.util.concurrent.atomic.AtomicReference<>();
         // 异步预约外部 operation，不阻塞 Bukkit 主线程喵~
         asyncAdapter.tryBeginOperationAsync(playerId, playerId, operationType.name().toLowerCase(Locale.ROOT))
                 .thenCompose(operationOptional -> {
@@ -416,6 +419,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                     }
                     // 保存 operation，之后 GUI 关闭成功才会在 provider 侧激活 token 喵~
                     BackpackOperation operation = operationOptional.get();
+                    // 记录已预约 operation，后续任一异常出口都可释放它喵~
+                    begunOperation.set(operation);
                     // 异步保存关闭目标 GUI 喵~
                     return asyncAdapter.saveAndCloseOpenGuiAsync(operation).thenCompose(failure -> {
                         // GUI 冻结未成功时释放预约，禁止 load 或 mutation 喵~
@@ -431,10 +436,13 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                     // 喵~防御：插件停用、玩家离线或异步失败时不得创建后继任务喵~
                     if (!plugin.isEnabled() || failure != null || preparedOperation == null || preparedOperation.isEmpty()
                             || !player.isOnline() || player.isDead()) {
+                        // 异常 stage 可能丢失 Optional，使用外层引用释放已经预约的 operation 喵~
+                        BackpackOperation operationToRelease = preparedOperation != null && preparedOperation.isPresent()
+                                ? preparedOperation.get() : begunOperation.get();
                         // 异步阶段已有 operation 时必须释放 token 或 reservation，避免目标永久锁定喵~
-                        if (preparedOperation != null && preparedOperation.isPresent()) {
-                            // 释放玩家离线或插件停用时遗留的 v2 operation 喵~
-                            asyncAdapter.finishOperationAsync(preparedOperation.get());
+                        if (operationToRelease != null) {
+                            // 释放玩家离线、插件停用或异常完成时遗留的 v2 operation 喵~
+                            asyncAdapter.finishOperationAsync(operationToRelease);
                         }
                         // 仅在线玩家接收保守取消提示喵~
                         if (player.isOnline()) {
