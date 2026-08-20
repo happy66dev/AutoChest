@@ -19,9 +19,9 @@ public final class PlayerBackpackHook implements Listener {
     private static final int REQUIRED_API_MAJOR = 1;
     private static final int REQUIRED_ASYNC_API_MAJOR = 2;
     private final Logger logger;
-    private Object api;
-    private Object asyncApi;
-    private String unavailableReason;
+    private volatile Object api;
+    private volatile Object asyncApi;
+    private volatile String unavailableReason;
 
     public PlayerBackpackHook(Logger logger) {
         if (logger == null) {
@@ -41,10 +41,16 @@ public final class PlayerBackpackHook implements Listener {
                 api = discoveredApi;
             }
             // v2 provider 独立发现，只有明确 supportsWriteOperations 且 ready 才作为可写 backend 喵~
-            Class<?> asyncApiClass = Class.forName(ASYNC_API_CLASS_NAME, false, pluginClassLoader);
-            Object discoveredAsyncApi = Bukkit.getServicesManager().load(asyncApiClass);
-            if (discoveredAsyncApi != null && isAsyncCompatible(discoveredAsyncApi)) {
-                asyncApi = discoveredAsyncApi;
+            try {
+                // 喵~防御：旧版 v1 插件没有 v2 类时保留已验证的 v1 provider 喵~
+                Class<?> asyncApiClass = Class.forName(ASYNC_API_CLASS_NAME, false, pluginClassLoader);
+                Object discoveredAsyncApi = Bukkit.getServicesManager().load(asyncApiClass);
+                if (discoveredAsyncApi != null && isAsyncCompatible(discoveredAsyncApi)) {
+                    asyncApi = discoveredAsyncApi;
+                }
+            } catch (ReflectiveOperationException | RuntimeException | LinkageError ignored) {
+                // 喵~防御：v2 provider 不兼容时保留已验证的 v1 provider 喵~
+                asyncApi = null;
             }
             if (api == null && asyncApi == null) {
                 markUnavailable("PlayerBackpack API 未注册、不可用或主版本不兼容喵~", null);
@@ -103,7 +109,8 @@ public final class PlayerBackpackHook implements Listener {
         // 仅处理 PlayerBackpack API 服务，避免无关插件事件触发刷新喵~
         if (SYNC_API_CLASS_NAME.equals(event.getProvider().getService().getName())
                 || ASYNC_API_CLASS_NAME.equals(event.getProvider().getService().getName())) {
-            markUnavailable("PlayerBackpack API 服务已撤销喵~", null);
+            // 重新发现仍存活的 provider，避免撤销单个 API 时误清空另一版本喵~
+            refresh();
         }
     }
 
@@ -122,9 +129,16 @@ public final class PlayerBackpackHook implements Listener {
             Object discoveredApi = Bukkit.getServicesManager().load(apiClass);
             api = discoveredApi != null && isCompatible(discoveredApi) ? discoveredApi : null;
             // 重新发现 v2 provider，并丢弃不具备完整写能力的只读实现喵~
-            Class<?> asyncApiClass = Class.forName(ASYNC_API_CLASS_NAME, false, pluginClassLoader);
-            Object discoveredAsyncApi = Bukkit.getServicesManager().load(asyncApiClass);
-            asyncApi = discoveredAsyncApi != null && isAsyncCompatible(discoveredAsyncApi) ? discoveredAsyncApi : null;
+            try {
+                // 喵~防御：v2 类缺失时清除异步 provider，但保留已发现的 v1 provider 喵~
+                Class<?> asyncApiClass = Class.forName(ASYNC_API_CLASS_NAME, false, pluginClassLoader);
+                Object discoveredAsyncApi = Bukkit.getServicesManager().load(asyncApiClass);
+                asyncApi = discoveredAsyncApi != null && isAsyncCompatible(discoveredAsyncApi)
+                        ? discoveredAsyncApi : null;
+            } catch (ClassNotFoundException | LinkageError ignored) {
+                // 旧版插件没有 v2 API 时回退到同步 v1 能力喵~
+                asyncApi = null;
+            }
             if (api == null && asyncApi == null) {
                 markUnavailable("PlayerBackpack API 未注册、不可用或主版本不兼容喵~", null);
                 return;
