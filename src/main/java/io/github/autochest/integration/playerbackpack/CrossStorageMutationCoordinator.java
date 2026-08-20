@@ -21,10 +21,16 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 // 导入 UUID 生成幂等 mutation 身份喵~
 import java.util.UUID;
-// 导入日志以输出不可恢复审计喵~
-import java.util.logging.Logger;
+// 导入异步阶段类型以跨 tick 等待 actor mutation 喵~
+import java.util.concurrent.CompletableFuture;
+// 导入异步完成阶段类型以保持 Bukkit 主线程非阻塞喵~
+import java.util.concurrent.CompletionStage;
+// 导入执行器类型以将 Bukkit 对象处理切回主线程喵~
+import java.util.concurrent.Executor;
 // 导入日志级别以标记严重不确定状态喵~
 import java.util.logging.Level;
+// 导入日志以输出不可恢复审计喵~
+import java.util.logging.Logger;
 
 // 协调 PlayerBackpack 单槽 CAS 与 Bukkit 容器单槽精确写入喵~
 public final class CrossStorageMutationCoordinator {
@@ -323,6 +329,227 @@ public final class CrossStorageMutationCoordinator {
         // 写后不一致时尝试条件补偿 PlayerBackpack 目标喵~
         return compensateOrFail(context, containerInventory, containerSlot, sourceBefore, sourceAfter,
                 logicalSlot, targetBefore, targetAfter, amount, mutationId, BackpackMutationDirection.RESTOCK, null);
+    }
+
+    // 异步执行 PlayerBackpack 来源到 Bukkit 容器的双域 mutation，所有 stage 完成后回到主线程喵~
+    public CompletionStage<Result> depositAsync(PlayerBackpackTaskContext context, Inventory containerInventory,
+                                                int containerSlot, int logicalSlot, int amount,
+                                                Executor mainThreadExecutor) {
+        // 喵~防御：缺少 async context 或主线程执行器时拒绝同步回退喵~
+        if (context == null || !context.usesAsyncBackend() || mainThreadExecutor == null
+                || !isValidRequest(context, containerInventory, containerSlot, logicalSlot, amount)) {
+            // 返回未提交结果喵~
+            return CompletableFuture.completedFuture(skipped());
+        }
+        // 在 Bukkit 主线程 capture 两侧 before-image，之后只跨异步边界传纯 DTO 喵~
+        BackpackSnapshot currentSnapshot = context.snapshot();
+        ItemStack sourceBefore = ContainerTransaction.cloneOrNull(currentSnapshot.itemAt(logicalSlot));
+        ItemStack targetBefore = ContainerTransaction.cloneOrNull(containerInventory.getItem(containerSlot));
+        // 喵~防御：来源、目标或容量不满足时不建立 journal 喵~
+        if (!canTransfer(sourceBefore, targetBefore, amount)) {
+            return CompletableFuture.completedFuture(skipped());
+        }
+        ItemStack sourceAfter = decrement(sourceBefore, amount);
+        ItemStack targetAfter = increment(sourceBefore, targetBefore, amount);
+        if (!isConserved(sourceBefore, targetBefore, sourceAfter, targetAfter)) {
+            return CompletableFuture.completedFuture(skipped());
+        }
+        UUID mutationId = UUID.randomUUID();
+        BackpackMutationRequest request = new BackpackMutationRequest(mutationId, currentSnapshot.playerId(),
+                BackpackMutationDirection.DEPOSIT, currentSnapshot.revision(), logicalSlot,
+                sourceBefore, sourceAfter, amount);
+        BackpackContainerMutation containerMutation = createContainerMutation(containerInventory, containerSlot,
+                targetBefore, targetAfter);
+        if (containerMutation == null) {
+            return CompletableFuture.completedFuture(skipped());
+        }
+        PlayerBackpackAsyncAdapter asyncAdapter = context.asyncAdapter();
+        // 顺序固定为 prepare → apply，provider stage 不在 Bukkit 主线程阻塞等待喵~
+        return asyncAdapter.prepareMutationAsync(context.operation(), request, containerMutation, mainThreadExecutor)
+                .thenComposeAsync(preparation -> {
+                    if (preparation == null || !preparation.applied()) {
+                        return CompletableFuture.<Result>completedFuture(skipped());
+                    }
+                    // apply 请求仍含 Bukkit ItemStack，必须由主线程编码后提交喵~
+                    return asyncAdapter.applyMutationAsync(context.operation(), request, mainThreadExecutor)
+                            .thenCompose(applied -> finishAsyncDeposit(context, containerInventory, containerSlot,
+                                    logicalSlot, amount, mutationId, sourceBefore, sourceAfter, targetBefore, targetAfter,
+                                    applied, mainThreadExecutor));
+                }, mainThreadExecutor)
+                .exceptionally(failure -> {
+                    logger.log(Level.SEVERE, "[AutoChest] 异步 deposit mutation 失败，必须人工 reconcile 喵~", failure);
+                    return new Result(Status.FAILED_UNRECOVERABLE, 0);
+                });
+    }
+
+    // 在异步 PlayerBackpack apply 完成后切回主线程提交容器，再异步终结 journal 喵~
+    private CompletionStage<Result> finishAsyncDeposit(PlayerBackpackTaskContext context, Inventory inventory,
+                                                        int containerSlot, int logicalSlot, int amount,
+                                                        UUID mutationId, ItemStack sourceBefore, ItemStack sourceAfter,
+                                                        ItemStack targetBefore, ItemStack targetAfter,
+                                                        BackpackMutationResult mutationResult,
+                                                        Executor mainThreadExecutor) {
+        if (mutationResult == null || mutationResult.status() == BackpackMutationResult.Status.RECONCILIATION_REQUIRED) {
+            return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
+        }
+        // provider 明确未应用时不执行补偿，保留两侧 before-image 喵~
+        if (!mutationResult.applied()) {
+            return CompletableFuture.completedFuture(skipped());
+        }
+        // mutation 成功后所有 Bukkit 校验、写入和补偿决策都在主线程执行喵~
+        if (mutationResult.movedAmount() != amount
+                || mutationResult.snapshot() == null || mutationResult.newRevision() <= context.snapshot().revision()
+                || mutationResult.newRevision() != mutationResult.snapshot().revision()
+                || !context.advance(mutationResult.snapshot())) {
+            return compensateAsync(context, inventory, containerSlot, targetBefore, targetAfter, logicalSlot,
+                    sourceBefore, sourceAfter, amount, mutationId, BackpackMutationDirection.DEPOSIT,
+                    mutationResult.newRevision(), mainThreadExecutor);
+        }
+        if (!sameSlot(inventory.getItem(containerSlot), targetBefore)) {
+            return compensateAsync(context, inventory, containerSlot, targetBefore, targetAfter, logicalSlot,
+                    sourceBefore, sourceAfter, amount, mutationId, BackpackMutationDirection.DEPOSIT,
+                    mutationResult.newRevision(), mainThreadExecutor);
+        }
+        try {
+            inventory.setItem(containerSlot, targetAfter.clone());
+        } catch (RuntimeException exception) {
+            return compensateAsync(context, inventory, containerSlot, targetBefore, targetAfter, logicalSlot,
+                    sourceBefore, sourceAfter, amount, mutationId, BackpackMutationDirection.DEPOSIT,
+                    mutationResult.newRevision(), mainThreadExecutor);
+        }
+        if (!sameSlot(inventory.getItem(containerSlot), targetAfter)) {
+            return compensateAsync(context, inventory, containerSlot, targetBefore, targetAfter, logicalSlot,
+                    sourceBefore, sourceAfter, amount, mutationId, BackpackMutationDirection.DEPOSIT,
+                    mutationResult.newRevision(), mainThreadExecutor);
+        }
+        return context.asyncAdapter().markContainerAppliedAsync(context.operation(), mutationId)
+                .thenApply(failure -> failure == BackpackOperationFailure.NONE
+                        ? new Result(Status.SUCCESS, amount)
+                        : new Result(Status.FAILED_UNRECOVERABLE, 0));
+    }
+
+    // 异步 deposit 失败时先条件恢复 Bukkit 容器，再提交 PlayerBackpack 补偿喵~
+    private CompletionStage<Result> compensateAsync(PlayerBackpackTaskContext context, Inventory inventory,
+                                                     int containerSlot, ItemStack containerBefore, ItemStack containerAfter,
+                                                     int logicalSlot, ItemStack backpackBefore, ItemStack backpackAfter,
+                                                     int amount, UUID originalMutationId,
+                                                     BackpackMutationDirection direction, long appliedRevision,
+                                                     Executor mainThreadExecutor) {
+        // 仅当容器仍是事务 after-image 时才允许恢复，第三种状态必须人工 reconcile 喵~
+        if (!sameSlot(inventory.getItem(containerSlot), containerBefore)) {
+            if (!sameSlot(inventory.getItem(containerSlot), containerAfter)) {
+                return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
+            }
+            try {
+                inventory.setItem(containerSlot, ContainerTransaction.cloneOrNull(containerBefore));
+            } catch (RuntimeException exception) {
+                return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
+            }
+        }
+        if (!sameSlot(inventory.getItem(containerSlot), containerBefore)) {
+            return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
+        }
+        BackpackMutationRequest compensationRequest = new BackpackMutationRequest(UUID.randomUUID(),
+                context.operation().targetId(), direction, appliedRevision, logicalSlot, backpackAfter,
+                backpackBefore, amount);
+        return context.asyncAdapter().applyCompensationAsync(context.operation(), originalMutationId,
+                        compensationRequest, mainThreadExecutor)
+                .thenApply(result -> result != null && result.applied() && result.movedAmount() == amount
+                        && result.snapshot() != null && context.advance(result.snapshot())
+                        ? new Result(Status.RECOVERED, 0)
+                        : new Result(Status.FAILED_UNRECOVERABLE, 0));
+    }
+
+    // 异步执行 Bukkit 容器来源到 PlayerBackpack 目标的双域 mutation 喵~
+    public CompletionStage<Result> restockAsync(PlayerBackpackTaskContext context, Inventory containerInventory,
+                                                int containerSlot, int logicalSlot, int amount,
+                                                Executor mainThreadExecutor) {
+        // 喵~防御：仅固定 async backend 可进入异步 restock，其他输入 fail-closed 喵~
+        if (context == null || !context.usesAsyncBackend() || mainThreadExecutor == null
+                || !isValidRequest(context, containerInventory, containerSlot, logicalSlot, amount)) {
+            return CompletableFuture.completedFuture(skipped());
+        }
+        // 主线程 capture 容器来源与 PlayerBackpack 目标 before-image 喵~
+        BackpackSnapshot currentSnapshot = context.snapshot();
+        ItemStack sourceBefore = ContainerTransaction.cloneOrNull(containerInventory.getItem(containerSlot));
+        ItemStack targetBefore = ContainerTransaction.cloneOrNull(currentSnapshot.itemAt(logicalSlot));
+        if (!canTransfer(sourceBefore, targetBefore, amount)) {
+            return CompletableFuture.completedFuture(skipped());
+        }
+        ItemStack sourceAfter = decrement(sourceBefore, amount);
+        ItemStack targetAfter = increment(sourceBefore, targetBefore, amount);
+        if (!isConserved(sourceBefore, targetBefore, sourceAfter, targetAfter)) {
+            return CompletableFuture.completedFuture(skipped());
+        }
+        UUID mutationId = UUID.randomUUID();
+        BackpackMutationRequest request = new BackpackMutationRequest(mutationId, currentSnapshot.playerId(),
+                BackpackMutationDirection.RESTOCK, currentSnapshot.revision(), logicalSlot,
+                targetBefore, targetAfter, amount);
+        BackpackContainerMutation containerMutation = createContainerMutation(containerInventory, containerSlot,
+                sourceBefore, sourceAfter);
+        if (containerMutation == null) {
+            return CompletableFuture.completedFuture(skipped());
+        }
+        PlayerBackpackAsyncAdapter asyncAdapter = context.asyncAdapter();
+        // 先 prepare durable intent，再 apply PlayerBackpack CAS，完成后回主线程提交容器扣减喵~
+        return asyncAdapter.prepareMutationAsync(context.operation(), request, containerMutation, mainThreadExecutor)
+                .thenComposeAsync(preparation -> {
+                    if (preparation == null || !preparation.applied()) {
+                        return CompletableFuture.<Result>completedFuture(skipped());
+                    }
+                    return asyncAdapter.applyMutationAsync(context.operation(), request, mainThreadExecutor)
+                            .thenCompose(applied -> finishAsyncRestock(context, containerInventory, containerSlot,
+                                    logicalSlot, amount, mutationId, targetBefore, targetAfter,
+                                    sourceBefore, sourceAfter, applied, mainThreadExecutor));
+                }, mainThreadExecutor)
+                .exceptionally(failure -> {
+                    logger.log(Level.SEVERE, "[AutoChest] 异步 restock mutation 失败，必须人工 reconcile 喵~", failure);
+                    return new Result(Status.FAILED_UNRECOVERABLE, 0);
+                });
+    }
+
+    // 在 PlayerBackpack apply 成功后校验并写入 Bukkit 容器来源，再终结 journal 喵~
+    private CompletionStage<Result> finishAsyncRestock(PlayerBackpackTaskContext context, Inventory inventory,
+                                                        int containerSlot, int logicalSlot, int amount,
+                                                        UUID mutationId, ItemStack targetBefore, ItemStack targetAfter,
+                                                        ItemStack sourceBefore, ItemStack sourceAfter,
+                                                        BackpackMutationResult mutationResult,
+                                                        Executor mainThreadExecutor) {
+        if (mutationResult == null || mutationResult.status() == BackpackMutationResult.Status.RECONCILIATION_REQUIRED) {
+            return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
+        }
+        if (!mutationResult.applied()) {
+            return CompletableFuture.completedFuture(skipped());
+        }
+        if (mutationResult.movedAmount() != amount || mutationResult.snapshot() == null
+                || mutationResult.newRevision() <= context.snapshot().revision()
+                || mutationResult.newRevision() != mutationResult.snapshot().revision()
+                || !context.advance(mutationResult.snapshot())) {
+            return compensateAsync(context, inventory, containerSlot, sourceBefore, sourceAfter, logicalSlot,
+                    targetBefore, targetAfter, amount, mutationId, BackpackMutationDirection.RESTOCK,
+                    mutationResult.newRevision(), mainThreadExecutor);
+        }
+        if (!sameSlot(inventory.getItem(containerSlot), sourceBefore)) {
+            return compensateAsync(context, inventory, containerSlot, sourceBefore, sourceAfter, logicalSlot,
+                    targetBefore, targetAfter, amount, mutationId, BackpackMutationDirection.RESTOCK,
+                    mutationResult.newRevision(), mainThreadExecutor);
+        }
+        try {
+            inventory.setItem(containerSlot, ContainerTransaction.cloneOrNull(sourceAfter));
+        } catch (RuntimeException exception) {
+            return compensateAsync(context, inventory, containerSlot, sourceBefore, sourceAfter, logicalSlot,
+                    targetBefore, targetAfter, amount, mutationId, BackpackMutationDirection.RESTOCK,
+                    mutationResult.newRevision(), mainThreadExecutor);
+        }
+        if (!sameSlot(inventory.getItem(containerSlot), sourceAfter)) {
+            return compensateAsync(context, inventory, containerSlot, sourceBefore, sourceAfter, logicalSlot,
+                    targetBefore, targetAfter, amount, mutationId, BackpackMutationDirection.RESTOCK,
+                    mutationResult.newRevision(), mainThreadExecutor);
+        }
+        return context.asyncAdapter().markContainerAppliedAsync(context.operation(), mutationId)
+                .thenApply(failure -> failure == BackpackOperationFailure.NONE
+                        ? new Result(Status.SUCCESS, amount)
+                        : new Result(Status.FAILED_UNRECOVERABLE, 0));
     }
 
     // apply 成功但上下文无法推进时，直接条件补偿 PlayerBackpack，容器尚未写入喵~

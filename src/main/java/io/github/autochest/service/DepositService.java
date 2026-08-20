@@ -51,6 +51,8 @@ public class DepositService {
     private final CrossStorageMutationCoordinator crossStorageCoordinator;
     // 保存跨域任务上下文表以读取当前玩家会话喵~
     private final PlayerBackpackTaskContexts playerBackpackTaskContexts;
+    // 保存主线程 executor，供 PlayerBackpack v2 CompletionStage 回调回 Bukkit 主线程喵~
+    private final java.util.concurrent.Executor mainThreadExecutor;
 
     /**
      * 创建存入服务
@@ -82,6 +84,8 @@ public class DepositService {
         this.crossStorageCoordinator = crossStorageCoordinator;
         // 保存可选跨域上下文表喵~
         this.playerBackpackTaskContexts = playerBackpackTaskContexts;
+        // 将所有异步 completion 投递回 Bukkit 主线程再读取 Inventory 或统计喵~
+        this.mainThreadExecutor = runnable -> Bukkit.getScheduler().runTask(plugin, runnable);
     }
 
     /**
@@ -375,7 +379,57 @@ public class DepositService {
                         containerSlotIndex++;
                         continue;
                     }
-                    // 跨域 mutation 必须在主线程完整执行，不在内部让出 tick 喵~
+                    // v2 backend 将 mutation 拆成 actor stage 与主线程 container commit，terminal 后才推进 cursor 喵~
+                    if (context.usesAsyncBackend()) {
+                        // capture 完成本次 cursor，异步回调重验任务并在下一 tick 续跑喵~
+                        int nextLogicalSlotIndex = logicalSlotIndex;
+                        int nextContainerIndex = containerIndex;
+                        int nextContainerSlotIndex = containerSlotIndex;
+                        crossStorageCoordinator.depositAsync(context, inventory, containerSlotIndex, logicalSlot,
+                                        amount, mainThreadExecutor)
+                                .whenComplete((result, failure) -> Bukkit.getScheduler().runTask(plugin, () -> {
+                                    // 喵~防御：迟到 callback、玩家状态或 context 失效时不得推进 cursor 或统计喵~
+                                    if (!registry.isValid(playerTask) || context != playerBackpackTaskContexts.get(playerTask.getPlayerUuid())
+                                            || !context.isOpen() || failure != null || result == null) {
+                                        onDone.onCancelled();
+                                        return;
+                                    }
+                                    // 终态成功后才计入物品和容器统计，异步操作已占用本 tick 自然结束喵~
+                                    if (result.status() == CrossStorageMutationCoordinator.Status.SUCCESS) {
+                                        stats.itemsMoved += result.movedAmount();
+                                        stats.markContainerUsed(identity);
+                                        ItemStack nextBackpackItem = ContainerTransaction.cloneOrNull(
+                                                context.snapshot().itemAt(logicalSlot));
+                                        if (nextBackpackItem == null) {
+                                            schedulePlayerBackpackContinuation(phase, identities, playerTask, plan, stats,
+                                                    logicalSlots, nextLogicalSlotIndex + 1, 0, 0,
+                                                    operationsPerTick, nanosPerTick, onComplete, onDone);
+                                        } else {
+                                            schedulePlayerBackpackContinuation(phase, identities, playerTask, plan, stats,
+                                                    logicalSlots, nextLogicalSlotIndex, nextContainerIndex,
+                                                    nextContainerSlotIndex + 1, operationsPerTick, nanosPerTick,
+                                                    onComplete, onDone);
+                                        }
+                                        return;
+                                    }
+                                    // 已恢复或明确跳过时前进当前容器槽位，不重复同一 mutation 喵~
+                                    if (result.status() == CrossStorageMutationCoordinator.Status.SKIPPED
+                                            || result.status() == CrossStorageMutationCoordinator.Status.RECOVERED) {
+                                        if (result.status() == CrossStorageMutationCoordinator.Status.RECOVERED) {
+                                            stats.skipped++;
+                                        }
+                                        schedulePlayerBackpackContinuation(phase, identities, playerTask, plan, stats,
+                                                logicalSlots, nextLogicalSlotIndex, nextContainerIndex,
+                                                nextContainerSlotIndex + 1, operationsPerTick, nanosPerTick,
+                                                onComplete, onDone);
+                                        return;
+                                    }
+                                    // 不确定状态停止任务并释放 operation，禁止后续写入喵~
+                                    onDone.onCancelled();
+                                }));
+                        return;
+                    }
+                    // v1 backend 保持旧同步调用路径喵~
                     CrossStorageMutationCoordinator.Result result = crossStorageCoordinator.deposit(
                             context, inventory, containerSlotIndex, logicalSlot, amount);
                     // 一次完整 mutation 结束后计入操作预算喵~

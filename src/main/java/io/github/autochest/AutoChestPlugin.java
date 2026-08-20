@@ -159,7 +159,11 @@ public class AutoChestPlugin extends JavaPlugin {
             taskRegistry.disablePlugin();
         }
 
-        // 步骤 2：释放所有存活的 PlayerBackpack 外部会话，避免插件停用后遗留目标锁。
+        // 步骤 2：停止接收新的 PlayerBackpack provider 服务，释放所有固定 backend 会话喵~
+        if (playerBackpackHook != null) {
+            playerBackpackHook.disable();
+        }
+        // 步骤 3：释放所有存活的 PlayerBackpack 外部会话，避免插件停用后遗留目标锁。
         if (playerBackpackTaskContexts != null) {
             playerBackpackTaskContexts.releaseAll();
         }

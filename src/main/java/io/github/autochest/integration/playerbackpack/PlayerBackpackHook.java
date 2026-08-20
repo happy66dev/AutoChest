@@ -191,6 +191,16 @@ public final class PlayerBackpackHook implements Listener {
         return Boolean.TRUE.equals(readyValue);
     }
 
+    // 插件停用时清空 provider，迟到 callback 保持固定 context 但不能发现新 backend 喵~
+    public synchronized void disable() {
+        // 清除 v1 与 v2 provider，阻止停用期间再创建 adapter 喵~
+        api = null;
+        // 清除异步 provider 引用喵~
+        asyncApi = null;
+        // 记录停用原因供命令层诊断喵~
+        unavailableReason = "AutoChest 正在停用喵~";
+    }
+
     private void markUnavailable(String reason, Throwable cause) {
         api = null;
         asyncApi = null;
