@@ -11,6 +11,7 @@ public record BackpackMutationResult(Status status, long newRevision, int movedA
 
     public enum Status {
         APPLIED,
+        REVISION_CONFLICT,
         SERVICE_UNAVAILABLE,
         RECONCILIATION_REQUIRED,
         FAILED

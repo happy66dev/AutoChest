@@ -404,6 +404,7 @@ public final class PlayerBackpackAsyncAdapter {
             BackpackMutationResult.Status status = switch (statusName) {
                 case "APPLIED", "IDEMPOTENT_REPLAY" -> BackpackMutationResult.Status.APPLIED;
                 case "RECONCILIATION_REQUIRED" -> BackpackMutationResult.Status.RECONCILIATION_REQUIRED;
+                case "REVISION_CONFLICT" -> BackpackMutationResult.Status.REVISION_CONFLICT;
                 case "SERVICE_UNAVAILABLE" -> BackpackMutationResult.Status.SERVICE_UNAVAILABLE;
                 default -> BackpackMutationResult.Status.FAILED;
             };

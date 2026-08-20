@@ -398,6 +398,11 @@ public final class CrossStorageMutationCoordinator {
         if (mutationResult == null || mutationResult.status() == BackpackMutationResult.Status.RECONCILIATION_REQUIRED) {
             return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
         }
+        if (mutationResult.status() == BackpackMutationResult.Status.REVISION_CONFLICT) {
+            // revision 冲突代表背包基线已过期，禁止把本次操作当作普通跳过喵~
+            logger.warning("[AutoChest] PlayerBackpack revision conflict，停止当前跨域 mutation 喵~");
+            return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
+        }
         // provider 明确未应用时不执行补偿，保留两侧 before-image 喵~
         if (!mutationResult.applied()) {
             return CompletableFuture.completedFuture(skipped());
