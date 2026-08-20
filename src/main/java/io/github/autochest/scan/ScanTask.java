@@ -74,6 +74,9 @@ public class ScanTask implements Runnable {
     /** 是否已完成扫描 */
     private boolean finished = false;
 
+    /** 是否已取消扫描，和自然枚举完成严格区分喵~ */
+    private boolean cancelled = false;
+
     /**
      * 创建扫描任务
      *
@@ -114,6 +117,10 @@ public class ScanTask implements Runnable {
      */
     @Override
     public void run() {
+        // 喵~防御：自然完成或取消后的 scheduler 迟到调用必须立即返回喵~
+        if (finished) {
+            return;
+        }
         // 检查任务是否仍然有效
         if (!registry.isValid(playerTask)) {
             cancel();
@@ -178,12 +185,10 @@ public class ScanTask implements Runnable {
         }
 
         // 喵~防御：取消或失效后不再进入完成回调，避免重复规划和重复提示喵~
-        if (finished) {
+        if (cancelled) {
             // 取消路径已经由 onCancelled 处理，直接结束本次 tick 喵~
             return;
         }
-        // 标记扫描已完成，周期调度器后续 tick 不再重复回调喵~
-        finished = true;
         // 扫描完成，按本次任务冻结的玩家偏好过滤并稳定排序后回调。
         List<ContainerIdentity> sorted = ContainerOrdering.order(
                 new ArrayList<>(found.values()), playerTask.getPreferencesSnapshot());
@@ -374,6 +379,8 @@ public class ScanTask implements Runnable {
         }
         // 发布扫描终态，阻止当前或后续 tick 进入完成回调喵~
         finished = true;
+        // 记录取消状态，避免自然枚举完成与取消路径混淆喵~
+        cancelled = true;
         // 通知命令层释放任务资源喵~
         onCancelled.run();
     }

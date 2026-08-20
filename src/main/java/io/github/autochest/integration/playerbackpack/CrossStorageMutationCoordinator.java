@@ -391,6 +391,10 @@ public final class CrossStorageMutationCoordinator {
                                                         ItemStack targetBefore, ItemStack targetAfter,
                                                         BackpackMutationResult mutationResult,
                                                         Executor mainThreadExecutor) {
+        // 喵~防御：异步结果回来时会话可能已经被退出、停服或 provider 撤销关闭喵~
+        if (context == null || !context.isOpen()) {
+            return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
+        }
         if (mutationResult == null || mutationResult.status() == BackpackMutationResult.Status.RECONCILIATION_REQUIRED) {
             return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
         }
@@ -406,6 +410,10 @@ public final class CrossStorageMutationCoordinator {
             return compensateAsync(context, inventory, containerSlot, targetBefore, targetAfter, logicalSlot,
                     sourceBefore, sourceAfter, amount, mutationId, BackpackMutationDirection.DEPOSIT,
                     mutationResult.newRevision(), mainThreadExecutor);
+        }
+        // 喵~防御：容器写入前再次确认上下文仍有效，禁止迟到回调修改 Bukkit 库存喵~
+        if (!context.isOpen()) {
+            return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
         }
         if (!sameSlot(inventory.getItem(containerSlot), targetBefore)) {
             return compensateAsync(context, inventory, containerSlot, targetBefore, targetAfter, logicalSlot,
@@ -532,6 +540,10 @@ public final class CrossStorageMutationCoordinator {
             return compensateAsync(context, inventory, containerSlot, sourceBefore, sourceAfter, logicalSlot,
                     targetBefore, targetAfter, amount, mutationId, BackpackMutationDirection.RESTOCK,
                     mutationResult.newRevision(), mainThreadExecutor);
+        }
+        // 喵~防御：容器写入前再次确认上下文仍有效，禁止迟到回调修改 Bukkit 库存喵~
+        if (!context.isOpen()) {
+            return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
         }
         if (!sameSlot(inventory.getItem(containerSlot), sourceBefore)) {
             return compensateAsync(context, inventory, containerSlot, sourceBefore, sourceAfter, logicalSlot,

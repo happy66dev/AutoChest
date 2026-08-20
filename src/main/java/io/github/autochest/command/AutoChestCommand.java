@@ -421,6 +421,11 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                     BackpackOperation operation = operationOptional.get();
                     // 记录已预约 operation，后续任一异常出口都可释放它喵~
                     begunOperation.set(operation);
+                    // 将预备 operation 纳入统一生命周期表，覆盖 context 注册前停服竞态喵~
+                    if (!playerBackpackTaskContexts.registerPending(playerId, asyncAdapter, operation)) {
+                        return asyncAdapter.finishOperationAsync(operation)
+                                .thenApply(ignored -> java.util.Optional.<BackpackOperation>empty());
+                    }
                     // 异步保存关闭目标 GUI 喵~
                     return asyncAdapter.saveAndCloseOpenGuiAsync(operation).thenCompose(failure -> {
                         // GUI 冻结未成功时释放预约，禁止 load 或 mutation 喵~
@@ -441,6 +446,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                                 ? preparedOperation.get() : begunOperation.get();
                         // 异步阶段已有 operation 时必须释放 token 或 reservation，避免目标永久锁定喵~
                         if (operationToRelease != null) {
+                            // 先移除预备资源登记，避免释放完成后被停服路径再次提交喵~
+                            playerBackpackTaskContexts.removePending(playerId, operationToRelease);
                             // 释放玩家离线、插件停用或异常完成时遗留的 v2 operation 喵~
                             asyncAdapter.finishOperationAsync(operationToRelease);
                         }
@@ -454,6 +461,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                     }
                     // 读取已保存关闭 GUI 后仍归当前任务拥有的 operation 喵~
                     BackpackOperation operation = preparedOperation.get();
+                    // 预备 operation 已转移给完整 context，先移除预备资源登记喵~
+                    playerBackpackTaskContexts.removePending(playerId, operation);
                     // 下一 tick 再确认 GUI 关闭，避免 close event 延迟或其他插件取消关闭喵~
                     Bukkit.getScheduler().runTask(plugin, () -> asyncAdapter.confirmExternalOperationReadyAsync(operation)
                             .thenCompose(readinessFailure -> {
