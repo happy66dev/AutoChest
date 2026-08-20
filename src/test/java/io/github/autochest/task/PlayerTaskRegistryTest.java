@@ -127,8 +127,15 @@ class PlayerTaskRegistryTest {
     }
 
     /**
-     * 不同玩家任务互不干扰
+     * 插件禁用后迟到 callback 不能重新创建任务。
      */
+    @Test
+    void tryAcquire_afterDisable_returnsEmpty() {
+        registry.disablePlugin();
+
+        assertTrue(acquireTask(playerUuid).isEmpty());
+    }
+
     @Test
     void differentPlayers_independentTasks() {
         UUID player2 = UUID.randomUUID();

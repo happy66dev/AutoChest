@@ -68,6 +68,14 @@ public class PlayerTaskRegistry {
             int centerY,
             int centerZ
     ) {
+        // 喵~防御：插件已禁用时拒绝创建任何新任务，避免迟到 callback 复活流程喵~
+        if (pluginGeneration == Integer.MAX_VALUE) {
+            return Optional.empty();
+        }
+        // 喵~防御：玩家或任务类型为空时拒绝创建不可验证任务喵~
+        if (playerUuid == null || type == null || configSnapshot == null || worldUuid == null) {
+            return Optional.empty();
+        }
         // 获取当前 session epoch，玩家若从未有过则初始化为 0
         int epoch = sessionEpochs.computeIfAbsent(playerUuid, k -> new AtomicInteger(0)).get();
         long token = ThreadLocalRandom.current().nextLong();
