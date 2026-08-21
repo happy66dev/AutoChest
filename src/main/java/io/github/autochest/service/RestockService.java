@@ -528,12 +528,19 @@ public class RestockService {
                                         onDone.onCancelled();
                                         return;
                                     }
-                                    // 只在完整 terminal 成功后更新统计并推进 cursor 喵~
+                                    // 只有明确成功的 mutation 才推进 cursor，未知状态必须停止后续写入喵~
                                     if (result.status() == CrossStorageMutationCoordinator.Status.SUCCESS) {
-                                        stats.itemsMoved += result.movedAmount();
-                                        stats.markContainerUsed(identities.get(nextContainerIndex));
+                                        // 只有实际移动物品的成功 mutation 才计入容器统计，零移动结果不能虚增容器数喵~
+                                        if (result.movedAmount() > 0) {
+                                            // 累加协调器确认的实际移动数量喵~
+                                            stats.itemsMoved += result.movedAmount();
+                                            // 记录实际参与写入的容器身份喵~
+                                            stats.markContainerUsed(identities.get(nextContainerIndex));
+                                        }
+                                        // 根据最新目标镜像决定继续当前来源槽位还是推进目标喵~
                                         ItemStack nextTargetItem = ContainerTransaction.cloneOrNull(
                                                 context.snapshot().itemAt(logicalSlot));
+                                        // 目标已满时推进逻辑槽位，否则保留当前容器槽位继续尝试喵~
                                         if (nextTargetItem == null || nextTargetItem.getAmount() >= nextTargetItem.getMaxStackSize()) {
                                             schedulePlayerBackpackTargetContinuation(identities, playerTask, stats,
                                                     logicalSlots, nextLogicalSlotIndex + 1, 0, 0, onDone);

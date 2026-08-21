@@ -76,14 +76,8 @@ public final class PreferencesGuiListener implements Listener {
         if (holder == null) {
             return;
         }
-        // 检查任意拖拽 raw slot 是否落入顶部 GUI。
-        for (int rawSlot : event.getRawSlots()) {
-            if (rawSlot >= 0 && rawSlot < event.getView().getTopInventory().getSize()) {
-                // 取消拖拽以防止玩家放入或取走展示物品。
-                event.setCancelled(true);
-                return;
-            }
-        }
+        // 喵~防御：本插件 GUI 不允许任何拖拽路径改动顶部或玩家背包，避免展示状态与偏好状态分裂。
+        event.setCancelled(true);
     }
 
     /** 条件清理关闭页面的会话。 */

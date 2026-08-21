@@ -35,6 +35,7 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 
@@ -903,8 +904,15 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                             return;
                         }
                         depositService.execute(plan, task, new DepositService.DepositCallback() {
+                            // 防止异步失败、完成和生命周期取消同时触发多次终态消息喵~
+                            private final AtomicBoolean terminal = new AtomicBoolean(false);
+
                             @Override
                             public void onComplete(DepositService.DepositStats stats) {
+                                // 喵~防御：终态回调只允许第一个调用方推进消息和资源释放喵~
+                                if (!terminal.compareAndSet(false, true)) {
+                                    return;
+                                }
                                 Player completedPlayer = Bukkit.getPlayer(task.getPlayerUuid());
                                 if (completedPlayer != null && completedPlayer.isOnline()) {
                                     if (stats.itemsMoved == 0) {
@@ -919,6 +927,10 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
 
                             @Override
                             public void onCancelled() {
+                                // 喵~防御：重复取消不能重复发送消息或释放新任务喵~
+                                if (!terminal.compareAndSet(false, true)) {
+                                    return;
+                                }
                                 Player cancelledPlayer = Bukkit.getPlayer(task.getPlayerUuid());
                                 if (cancelledPlayer != null && cancelledPlayer.isOnline()) {
                                     plugin.getMessageService().sendCancelled(cancelledPlayer);
@@ -1032,8 +1044,15 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                             return;
                         }
                         restockService.execute(plan, task, whitelist, new RestockService.RestockCallback() {
+                            // 防止补货异步完成与取消竞争导致重复终态处理喵~
+                            private final AtomicBoolean terminal = new AtomicBoolean(false);
+
                             @Override
                             public void onComplete(RestockService.RestockStats stats) {
+                                // 喵~防御：终态回调只允许一次，避免重复统计与释放喵~
+                                if (!terminal.compareAndSet(false, true)) {
+                                    return;
+                                }
                                 restockListener.stopTracking(task.getPlayerUuid(), whitelist);
                                 Player completedPlayer = Bukkit.getPlayer(task.getPlayerUuid());
                                 if (completedPlayer != null && completedPlayer.isOnline()) {
@@ -1049,6 +1068,10 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
 
                             @Override
                             public void onCancelled() {
+                                // 喵~防御：重复取消不能重复发送消息或释放任务喵~
+                                if (!terminal.compareAndSet(false, true)) {
+                                    return;
+                                }
                                 restockListener.stopTracking(task.getPlayerUuid(), whitelist);
                                 Player cancelledPlayer = Bukkit.getPlayer(task.getPlayerUuid());
                                 if (cancelledPlayer != null && cancelledPlayer.isOnline()) {

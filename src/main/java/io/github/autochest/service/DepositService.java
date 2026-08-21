@@ -394,10 +394,15 @@ public class DepositService {
                                         onDone.onCancelled();
                                         return;
                                     }
-                                    // 终态成功后才计入物品和容器统计，异步操作已占用本 tick 自然结束喵~
+                                    // 只有实际移动成功才更新物品与容器统计，零移动成功不能虚增结果喵~
                                     if (result.status() == CrossStorageMutationCoordinator.Status.SUCCESS) {
-                                        stats.itemsMoved += result.movedAmount();
-                                        stats.markContainerUsed(identity);
+                                        // 只累加协调器确认的实际移动数量喵~
+                                        if (result.movedAmount() > 0) {
+                                            // 累加成功移动数量喵~
+                                            stats.itemsMoved += result.movedAmount();
+                                            // 记录实际接收物品的容器喵~
+                                            stats.markContainerUsed(identity);
+                                        }
                                         ItemStack nextBackpackItem = ContainerTransaction.cloneOrNull(
                                                 context.snapshot().itemAt(logicalSlot));
                                         if (nextBackpackItem == null) {
