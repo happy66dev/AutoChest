@@ -489,10 +489,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                                         snapshotOptional.get());
                                 // 原子转移 pending operation 与完整 context，避免停服竞态产生资源空窗喵~
                                 if (!playerBackpackTaskContexts.adoptPending(playerId, operation, context)) {
-                                    // 先条件移除 pending，避免关闭后生命周期路径再次释放同一 operation 喵~
-                                    playerBackpackTaskContexts.removePending(playerId, operation);
-                                    // 转移失败时关闭未登记 context 并释放 operation 喵~
-                                    context.close();
+                                    // 转移失败时仅由仍持有 pending 的路径执行 finish，避免与生命周期释放重复喵~
+                                    playerBackpackTaskContexts.releasePending(playerId, operation);
                                     // 结束冲突路径喵~
                                     return;
                                 }
