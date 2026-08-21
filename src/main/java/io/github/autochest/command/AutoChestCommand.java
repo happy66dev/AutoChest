@@ -404,6 +404,10 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         }
         // 主线程 capture 不可变玩家身份，异步 callback 不再读取易变 Player 对象喵~
         java.util.UUID playerId = player.getUniqueId();
+        // 捕获命令开始时 session epoch，生命周期事件发生后禁止迟到预备链创建新任务喵~
+        int expectedSessionEpoch = registry.getSessionEpoch(playerId);
+        // 捕获命令开始时世界身份，避免换世界后在新地点执行旧命令喵~
+        java.util.UUID expectedWorldId = player.getWorld().getUID();
         // 保存已预约 operation，异常 completion 也能进入统一释放出口喵~
         java.util.concurrent.atomic.AtomicReference<BackpackOperation> begunOperation =
                 new java.util.concurrent.atomic.AtomicReference<>();
@@ -412,6 +416,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                 .thenCompose(operationOptional -> {
                     // 预约失败时返回空值，由主线程发送冲突消息喵~
                     if (operationOptional == null || operationOptional.isEmpty()) {
+                        // 记录 provider 未签发 operation 的阶段，PlayerBackpack 日志可据此区分缺记录、预约冲突和未就绪喵~
+                        logPreflightFailure(playerId, "tryBeginOperation-empty", null, null);
                         // 维持 optional 链路，不进入 GUI 操作喵~
                         return java.util.concurrent.CompletableFuture.completedFuture(java.util.Optional.<BackpackOperation>empty());
                     }
@@ -421,7 +427,11 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                     begunOperation.set(operation);
                     // 将预备 operation 纳入统一生命周期表，覆盖 context 注册前停服竞态喵~
                     if (!playerBackpackTaskContexts.registerPending(playerId, asyncAdapter, operation)) {
-                        // 让外层统一 cleanup，避免同一 operation 被重复 finish 喵~
+                        // 注册被停服闸门或既有预备流程拒绝时，当前 continuation 仍独占刚取得的 operation喵~
+                        asyncAdapter.finishOperationAsync(operation);
+                        // 记录明确阶段，避免玩家只看到无诊断的操作取消喵~
+                        logPreflightFailure(playerId, "registerPending", operation, null);
+                        // 结束当前预备流程喵~
                         return java.util.concurrent.CompletableFuture.completedFuture(
                                 java.util.Optional.<BackpackOperation>empty());
                     }
@@ -429,6 +439,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                     return asyncAdapter.saveAndCloseOpenGuiAsync(operation).thenCompose(failure -> {
                         // GUI 冻结未成功时释放预约，禁止 load 或 mutation 喵~
                         if (failure != BackpackOperationFailure.NONE) {
+                            // 记录 provider 返回的具体失败阶段喵~
+                            logPreflightFailure(playerId, "saveAndCloseOpenGui", operation, failure);
                             // 让外层统一 cleanup，避免同一 operation 被重复 finish 喵~
                             return java.util.concurrent.CompletableFuture.completedFuture(
                                     java.util.Optional.<BackpackOperation>empty());
@@ -437,12 +449,14 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                         return java.util.concurrent.CompletableFuture.completedFuture(java.util.Optional.of(operation));
                     });
                 }).whenComplete((preparedOperation, failure) -> scheduleMainIfEnabled(() -> {
-                    // 喵~防御：插件停用后不再创建 Bukkit scheduler 任务喵~
+                    // 喵~防御：插件、生命周期、玩家或异步预备任一失效时必须停止，不得在新世界创建旧命令任务喵~
                     if (!plugin.isEnabled() || failure != null || preparedOperation == null || preparedOperation.isEmpty()
-                            || !player.isOnline() || player.isDead()) {
+                            || !isPreflightStillValid(player, playerId, expectedSessionEpoch, expectedWorldId)) {
                         // 异常 stage 可能丢失 Optional，使用外层引用释放已经预约的 operation 喵~
                         BackpackOperation operationToRelease = preparedOperation != null && preparedOperation.isPresent()
                                 ? preparedOperation.get() : begunOperation.get();
+                        // 输出阶段和生命周期状态，避免仅显示操作取消喵~
+                        logPreflightFailure(playerId, "initial-preflight", operationToRelease, failure);
                         // 异步阶段已有 operation 时必须释放 token 或 reservation，避免目标永久锁定喵~
                         if (operationToRelease != null) {
                             // 仅 pending owner 可释放 v2 operation，避免与生命周期路径双重 finish 喵~
@@ -459,10 +473,29 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                     // 读取已保存关闭 GUI 后仍归当前任务拥有的 operation 喵~
                     BackpackOperation operation = preparedOperation.get();
                     // 下一 tick 再确认 GUI 关闭，避免 close event 延迟或其他插件取消关闭喵~
-                    scheduleMainIfEnabled(() -> asyncAdapter.confirmExternalOperationReadyAsync(operation)
+                    scheduleMainIfEnabled(() -> {
+                        // 喵~防御：生命周期释放或换世界后不能继续对已失效 operation 发起 provider 调用喵~
+                        if (!isPreflightStillValid(player, playerId, expectedSessionEpoch, expectedWorldId)
+                                || !playerBackpackTaskContexts.ownsPending(playerId, operation)) {
+                            // 只有 pending 当前 owner 可安全 finish operation 喵~
+                            playerBackpackTaskContexts.releasePending(playerId, operation);
+                            // 记录预备所有权丢失喵~
+                            logPreflightFailure(playerId, "before-readiness", operation, null);
+                            // 仅仍在线玩家接收保守取消提示喵~
+                            if (player.isOnline()) {
+                                // 通知玩家操作已经取消喵~
+                                plugin.getMessageService().sendCancelled(player);
+                            }
+                            // 停止后续 provider 调用喵~
+                            return;
+                        }
+                        // 确认 GUI 已关闭，再读取 actor 快照喵~
+                        asyncAdapter.confirmExternalOperationReadyAsync(operation)
                             .thenCompose(readinessFailure -> {
                                 // readiness 失败时释放 token，禁止读取或写入背包喵~
                                 if (readinessFailure != BackpackOperationFailure.NONE) {
+                                    // 记录 GUI readiness provider 返回的明确失败原因喵~
+                                    logPreflightFailure(playerId, "confirmExternalOperationReady", operation, readinessFailure);
                                     // 让外层统一 cleanup，避免同一 operation 被重复 finish 喵~
                                     return java.util.concurrent.CompletableFuture.completedFuture(
                                             java.util.Optional.<BackpackSnapshot>empty());
@@ -470,10 +503,24 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                                 // actor load 不访问 Bukkit，快照 DTO 解码由 adapter 投递主线程喵~
                                 return asyncAdapter.loadSnapshotAsync(playerId,
                                         runnable -> scheduleMainIfEnabled(runnable));
-                            }).whenComplete((snapshotOptional, snapshotFailure) -> Bukkit.getScheduler().runTask(plugin, () -> {
-                                // 喵~防御：插件、玩家、操作或快照任一失效时释放固定 backend 会话喵~
-                                if (!plugin.isEnabled() || snapshotFailure != null || snapshotOptional == null
-                                        || snapshotOptional.isEmpty() || !player.isOnline() || player.isDead()) {
+                            }).whenComplete((snapshotOptional, snapshotFailure) -> {
+                                // 插件停用后 scheduler 不可用，但 pending operation 仍须在 completion 线程释放喵~
+                                if (!plugin.isEnabled()) {
+                                    // 仅当前 pending owner 可释放 provider operation 喵~
+                                    playerBackpackTaskContexts.releasePending(playerId, operation);
+                                    // 记录停服期间的快照 completion 喵~
+                                    logPreflightFailure(playerId, "snapshot-after-disable", operation, snapshotFailure);
+                                    // 不向 Bukkit scheduler 投递 callback 喵~
+                                    return;
+                                }
+                                // 回到 Bukkit 主线程处理 DTO 快照、会话收养和任务创建喵~
+                                scheduleMainIfEnabled(() -> {
+                                // 喵~防御：插件、生命周期、pending 所有权、快照任一失效时释放固定 backend 会话喵~
+                                if (!isPreflightStillValid(player, playerId, expectedSessionEpoch, expectedWorldId)
+                                        || !playerBackpackTaskContexts.ownsPending(playerId, operation)
+                                        || snapshotFailure != null || snapshotOptional == null || snapshotOptional.isEmpty()) {
+                                    // 输出 snapshot 或生命周期阶段的明确诊断喵~
+                                    logPreflightFailure(playerId, "loadSnapshot", operation, snapshotFailure);
                                     // 快照失败时只让 pending owner 执行一次 v2 finish 喵~
                                     playerBackpackTaskContexts.releasePending(playerId, operation);
                                     // 仅在线玩家接收取消提示喵~
@@ -489,6 +536,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                                         snapshotOptional.get());
                                 // 原子转移 pending operation 与完整 context，避免停服竞态产生资源空窗喵~
                                 if (!playerBackpackTaskContexts.adoptPending(playerId, operation, context)) {
+                                    // 输出 pending 到 context 转移失败的明确诊断喵~
+                                    logPreflightFailure(playerId, "adoptPending", operation, null);
                                     // 转移失败时仅由仍持有 pending 的路径执行 finish，避免与生命周期释放重复喵~
                                     playerBackpackTaskContexts.releasePending(playerId, operation);
                                     // 结束冲突路径喵~
@@ -496,8 +545,40 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                                 }
                                 // 创建实际 AutoChest 扫描与跨域任务喵~
                                 afterFreeze.run();
-                            })));
+                                });
+                            });
+                    });
                 }));
+    }
+
+    // 判断异步预备链仍对应发起命令时的玩家生命周期与世界，防止迟到 callback 在新状态创建任务喵~
+    private boolean isPreflightStillValid(Player player, UUID playerId, int expectedSessionEpoch,
+                                          UUID expectedWorldId) {
+        // 喵~防御：玩家、身份或世界参数缺失时不能继续跨域预备喵~
+        if (player == null || playerId == null || expectedWorldId == null) {
+            // 返回预备已失效喵~
+            return false;
+        }
+        // 只有在线、存活、身份匹配、epoch 未变且仍在原世界的玩家可继续喵~
+        return player.isOnline() && !player.isDead() && playerId.equals(player.getUniqueId())
+                && registry.getSessionEpoch(playerId) == expectedSessionEpoch
+                && expectedWorldId.equals(player.getWorld().getUID());
+    }
+
+    // 记录 v2 预备失败阶段而不输出物品内容，供管理员定位 provider 取消原因喵~
+    private void logPreflightFailure(UUID playerId, String stage, BackpackOperation operation, Object detail) {
+        // 喵~防御：空阶段不能产生不可检索日志喵~
+        if (stage == null || stage.isBlank()) {
+            // 结束无效日志请求喵~
+            return;
+        }
+        // 提取 operation token 的短标识，避免完整高熵 token 出现在日志中喵~
+        String operationId = operation == null || operation.token() == null ? "none"
+                : Integer.toHexString(operation.token().hashCode());
+        // 记录 player、阶段、操作标识和 provider/exception 摘要喵~
+        plugin.getLogger().warning("[AutoChest] PlayerBackpack v2 预备未完成：玩家=" + playerId
+                + "，阶段=" + stage + "，operation=" + operationId + "，详情="
+                + (detail == null ? "无" : detail));
     }
 
     // 只在插件仍启用时向 Bukkit 主线程提交 callback，避免停服后的 IllegalPluginAccessException 喵~

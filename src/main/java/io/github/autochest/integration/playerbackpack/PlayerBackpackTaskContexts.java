@@ -112,6 +112,19 @@ public final class PlayerBackpackTaskContexts {
         return pendingOperations.putIfAbsent(playerUuid, PendingOperation.forAsync(asyncAdapter, operation)) == null;
     }
 
+    // 判断指定 operation 仍由 pending 映射唯一持有，供异步预备链在发起 provider 调用前重验生命周期喵~
+    public synchronized boolean ownsPending(UUID playerUuid, BackpackOperation operation) {
+        // 喵~防御：空玩家或 operation 不能具备 pending 所有权喵~
+        if (playerUuid == null || operation == null) {
+            // 返回没有所有权喵~
+            return false;
+        }
+        // 读取当前玩家的 pending operation 记录喵~
+        PendingOperation pendingOperation = pendingOperations.get(playerUuid);
+        // 仅完全相同 operation 才允许继续预备调用喵~
+        return pendingOperation != null && pendingOperation.operation().equals(operation);
+    }
+
     // 条件移除 pending 并只由成功取得所有权的一方释放 provider operation 喵~
     public synchronized boolean releasePending(UUID playerUuid, BackpackOperation operation) {
         // 喵~防御：空参数不能触碰其他玩家预备资源喵~
