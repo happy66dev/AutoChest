@@ -652,6 +652,17 @@ public final class PlayerPreferencesService {
     }
 
     /**
+     * 停止接收新更新并立即返回，允许 daemon 持久化线程在停服阶段自行完成剩余队列。
+     * 该方法专供 Bukkit onDisable 使用，避免主线程等待文件 IO。
+     */
+    public void closeWithoutWaiting() {
+        // 标记关闭以拒绝停服开始后的新配置更新。
+        closing = true;
+        // 停止接收新任务但保留已提交队列继续执行。
+        persistenceExecutor.shutdown();
+    }
+
+    /**
      * 停止服务并有界等待排队写入完成。
      *
      * @param timeoutSeconds 最大等待秒数。

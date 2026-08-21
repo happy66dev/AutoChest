@@ -168,27 +168,19 @@ public class AutoChestPlugin extends JavaPlugin {
             playerBackpackTaskContexts.releaseAll();
         }
 
-        // 步骤 3：停止线程池，等待最多 2 秒后强制停止
+        // 步骤 3：停止规划线程池，禁止 onDisable 主线程等待外部持久化完成喵~
         if (executor != null) {
             executor.shutdown();
-            try {
-                if (!executor.awaitTermination(2, TimeUnit.SECONDS)) {
-                    executor.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                executor.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
         }
 
-        // 步骤 3：使 GUI 会话失效，阻止迟到库存事件修改偏好。
+        // 步骤 4：使 GUI 会话失效，阻止迟到库存事件修改偏好。
         if (preferencesGuiListener != null) {
             preferencesGuiListener.disable();
         }
 
-        // 步骤 4：有界刷新玩家偏好 JSON，避免服务器关闭时丢失最后一次设置修改。
+        // 步骤 5：停止偏好持久化队列但不在 Bukkit 主线程等待文件 IO 喵~
         if (playerPreferencesService != null) {
-            playerPreferencesService.flushAndClose(2L);
+            playerPreferencesService.closeWithoutWaiting();
         }
 
         // 步骤 6：清空冷却记录
