@@ -180,6 +180,12 @@ public final class PlayerBackpackAdapter {
     }
 
     public void finish(BackpackOperation operation) {
+        // 喵~防御：同步 v1 provider 可能执行 JDBC，禁止在 Bukkit 主线程等待释放喵~
+        if (isBukkitPrimaryThread()) {
+            log(Level.SEVERE, "finishOperation", operation == null ? null : operation.targetId(),
+                    new IllegalStateException("同步 PlayerBackpack 释放禁止在 Bukkit 主线程执行喵~"));
+            return;
+        }
         if (operation == null) {
             return;
         }
