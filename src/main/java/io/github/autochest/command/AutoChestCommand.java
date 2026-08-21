@@ -459,7 +459,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                     // 读取已保存关闭 GUI 后仍归当前任务拥有的 operation 喵~
                     BackpackOperation operation = preparedOperation.get();
                     // 下一 tick 再确认 GUI 关闭，避免 close event 延迟或其他插件取消关闭喵~
-                    Bukkit.getScheduler().runTask(plugin, () -> asyncAdapter.confirmExternalOperationReadyAsync(operation)
+                    scheduleMainIfEnabled(() -> asyncAdapter.confirmExternalOperationReadyAsync(operation)
                             .thenCompose(readinessFailure -> {
                                 // readiness 失败时释放 token，禁止读取或写入背包喵~
                                 if (readinessFailure != BackpackOperationFailure.NONE) {
@@ -469,7 +469,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                                 }
                                 // actor load 不访问 Bukkit，快照 DTO 解码由 adapter 投递主线程喵~
                                 return asyncAdapter.loadSnapshotAsync(playerId,
-                                        runnable -> Bukkit.getScheduler().runTask(plugin, runnable));
+                                        runnable -> scheduleMainIfEnabled(runnable));
                             }).whenComplete((snapshotOptional, snapshotFailure) -> Bukkit.getScheduler().runTask(plugin, () -> {
                                 // 喵~防御：插件、玩家、操作或快照任一失效时释放固定 backend 会话喵~
                                 if (!plugin.isEnabled() || snapshotFailure != null || snapshotOptional == null
