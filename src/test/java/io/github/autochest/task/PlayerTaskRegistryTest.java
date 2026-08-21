@@ -148,6 +148,31 @@ class PlayerTaskRegistryTest {
         assertTrue(registry.isValid(t2), "玩家2的任务不应受影响");
     }
 
+    /**
+     * invalidate 应立即移除旧任务，避免重连玩家在旧回调前被错误占用。
+     */
+    @Test
+    void invalidate_removesActiveTaskImmediately() {
+        PlayerTask oldTask = acquireTask(playerUuid).orElseThrow();
+
+        registry.invalidate(playerUuid);
+
+        assertFalse(registry.hasActiveTask(playerUuid));
+        assertTrue(acquireTask(playerUuid).isPresent());
+        assertFalse(registry.isValid(oldTask));
+    }
+
+    /**
+     * disablePlugin 应清理历史 epoch，避免长期保留玩家 UUID。
+     */
+    @Test
+    void disablePlugin_clearsSessionEpochState() {
+        acquireTask(playerUuid);
+        registry.invalidate(playerUuid);
+        registry.disablePlugin();
+
+        assertEquals(0, registry.getSessionEpoch(playerUuid));
+    }
     /** 辅助方法：以测试默认值获取任务 */
     private Optional<PlayerTask> acquireTask(UUID uuid) {
         return registry.tryAcquire(uuid, OperationType.DEPOSIT, config, worldUuid, 0, 64, 0);

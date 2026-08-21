@@ -131,8 +131,8 @@ public final class CrossStorageMutationCoordinator {
         }
         // 只有成功准备或完全相同的幂等重放才能修改 PlayerBackpack 喵~
         if (!preparationResult.applied()) {
-            // 保持两侧物品不变喵~
-            return skipped();
+            // 喵~防御：准备状态不是 APPLIED 时 journal 是否落盘未知，必须停止并 reconcile 喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
         }
         // 先持久化 PlayerBackpack 来源扣除，杜绝 SQLite 失败导致容器复制喵~
         BackpackMutationResult mutationResult = context.adapter().applyMutation(context.operation(), request);
@@ -146,10 +146,10 @@ public final class CrossStorageMutationCoordinator {
             // 保留 provider journal 并阻止后续猜测性写入喵~
             return new Result(Status.FAILED_UNRECOVERABLE, 0);
         }
-        // 明确未应用的服务失败或 CAS 冲突可以安全跳过喵~
+        // 仅明确未应用的 revision conflict 或可证明未匹配结果允许跳过喵~
         if (!mutationResult.applied()) {
-            // 冲突或存储失败时保持容器不变喵~
-            return skipped();
+            // 喵~防御：服务失败、未知结果或 journal 状态不确定时必须停止并 reconcile 喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
         }
         // apply 成功必须精确移动请求数量，否则双方状态无法按本事务镜像解释喵~
         if (mutationResult.movedAmount() != amount) {
@@ -260,8 +260,8 @@ public final class CrossStorageMutationCoordinator {
         }
         // 只有成功准备或完全相同的幂等重放才能修改 PlayerBackpack 喵~
         if (!preparationResult.applied()) {
-            // 保持两侧物品不变喵~
-            return skipped();
+            // 喵~防御：准备状态不是 APPLIED 时 journal 是否落盘未知，必须停止并 reconcile 喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
         }
         // 先持久化 PlayerBackpack 目标增加，随后才扣减 Bukkit 容器来源喵~
         BackpackMutationResult mutationResult = context.adapter().applyMutation(context.operation(), request);
@@ -275,10 +275,10 @@ public final class CrossStorageMutationCoordinator {
             // 保留 provider journal 并阻止后续猜测性写入喵~
             return new Result(Status.FAILED_UNRECOVERABLE, 0);
         }
-        // 明确未应用的服务失败或 CAS 冲突可以安全跳过喵~
+        // 仅明确未应用的 revision conflict 或可证明未匹配结果允许跳过喵~
         if (!mutationResult.applied()) {
-            // 冲突或存储失败时保持容器不变喵~
-            return skipped();
+            // 喵~防御：服务失败、未知结果或 journal 状态不确定时必须停止并 reconcile 喵~
+            return new Result(Status.FAILED_UNRECOVERABLE, 0);
         }
         // apply 成功必须精确移动请求数量，否则不能扣减 Bukkit 来源喵~
         if (mutationResult.movedAmount() != amount) {
@@ -428,9 +428,9 @@ public final class CrossStorageMutationCoordinator {
             logger.warning("[AutoChest] PlayerBackpack revision conflict，重规划次数已耗尽喵~");
             return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
         }
-        // provider 明确未应用时不执行补偿，保留两侧 before-image 喵~
         if (!mutationResult.applied()) {
-            return CompletableFuture.completedFuture(skipped());
+            // 喵~防御：apply 非 APPLIED 结果无法证明未提交，必须停止并进入 reconcile 喵~
+            return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
         }
         // mutation 成功后所有 Bukkit 校验、写入和补偿决策都在主线程执行喵~
         if (mutationResult.movedAmount() != amount
@@ -599,7 +599,8 @@ public final class CrossStorageMutationCoordinator {
             return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
         }
         if (!mutationResult.applied()) {
-            return CompletableFuture.completedFuture(skipped());
+            // 喵~防御：apply 非 APPLIED 结果无法证明未提交，必须停止并进入 reconcile 喵~
+            return CompletableFuture.completedFuture(new Result(Status.FAILED_UNRECOVERABLE, 0));
         }
         if (mutationResult.movedAmount() != amount || mutationResult.snapshot() == null
                 || mutationResult.newRevision() <= context.snapshot().revision()

@@ -9,6 +9,7 @@ import java.util.TreeMap;
 import java.util.UUID;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import org.bukkit.Bukkit;
 import org.bukkit.inventory.ItemStack;
 
 public final class PlayerBackpackAdapter {
@@ -33,7 +34,17 @@ public final class PlayerBackpackAdapter {
         this.apiConstructors = new java.util.HashMap<>();
     }
 
+    private boolean isBukkitPrimaryThread() {
+        org.bukkit.Server bukkitServer = Bukkit.getServer();
+        return bukkitServer != null && bukkitServer.isPrimaryThread();
+    }
     public Optional<BackpackSnapshot> loadSnapshot(UUID targetId) {
+        // 喵~防御：同步 v1 provider 可能执行 JDBC，禁止在 Bukkit 主线程等待喵~
+        if (isBukkitPrimaryThread()) {
+            log(Level.WARNING, "loadSnapshot", targetId,
+                    new IllegalStateException("同步 PlayerBackpack 调用禁止在 Bukkit 主线程执行喵~"));
+            return Optional.empty();
+        }
         if (targetId == null) {
             return Optional.empty();
         }
@@ -50,6 +61,12 @@ public final class PlayerBackpackAdapter {
     }
 
     public Optional<BackpackOperation> tryBeginOperation(UUID targetId, UUID requesterId, String reason) {
+        // 喵~防御：同步 v1 provider 可能执行 JDBC，禁止在 Bukkit 主线程等待喵~
+        if (isBukkitPrimaryThread()) {
+            log(Level.WARNING, "tryBeginOperation", targetId,
+                    new IllegalStateException("同步 PlayerBackpack 调用禁止在 Bukkit 主线程执行喵~"));
+            return Optional.empty();
+        }
         if (targetId == null || requesterId == null || reason == null || reason.isBlank()) {
             return Optional.empty();
         }
@@ -66,6 +83,12 @@ public final class PlayerBackpackAdapter {
     }
 
     public BackpackOperationFailure saveAndCloseOpenGui(BackpackOperation operation) {
+        // 喵~防御：同步 v1 provider 可能执行 JDBC，禁止在 Bukkit 主线程等待喵~
+        if (isBukkitPrimaryThread()) {
+            log(Level.WARNING, "saveAndCloseOpenGui", operation == null ? null : operation.targetId(),
+                    new IllegalStateException("同步 PlayerBackpack 调用禁止在 Bukkit 主线程执行喵~"));
+            return BackpackOperationFailure.SERVICE_UNAVAILABLE;
+        }
         if (operation == null) {
             return BackpackOperationFailure.PRECONDITION_FAILED;
         }
@@ -79,6 +102,12 @@ public final class PlayerBackpackAdapter {
 
     // 在下一 tick 建立快照前确认 provider 已关闭全部目标 GUI 喵~
     public BackpackOperationFailure confirmExternalOperationReady(BackpackOperation operation) {
+        // 喵~防御：同步 v1 provider 可能执行 JDBC，禁止在 Bukkit 主线程等待喵~
+        if (isBukkitPrimaryThread()) {
+            log(Level.WARNING, "confirmExternalOperationReady", operation == null ? null : operation.targetId(),
+                    new IllegalStateException("同步 PlayerBackpack 调用禁止在 Bukkit 主线程执行喵~"));
+            return BackpackOperationFailure.SERVICE_UNAVAILABLE;
+        }
         // 喵~防御：操作句柄为空时不能确认 GUI 冻结状态喵~
         if (operation == null) {
             // 返回前置条件失败喵~

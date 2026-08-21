@@ -237,12 +237,16 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         // 读取当前预备阶段注册的 PlayerBackpack context 喵~
         PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(player.getUniqueId());
         // 喵~防御：跨域 context 缺失或不属于本次 task 时立即释放，禁止孤立 operation 继续喵~
-        if (context != null && !playerBackpackTaskContexts.bind(player.getUniqueId(), context,
+        if (context == null || !playerBackpackTaskContexts.bind(player.getUniqueId(), context,
                 task.getToken(), task.getSessionEpoch())) {
             // 释放刚创建但尚未执行的 AutoChest task 喵~
             registry.release(task.getPlayerUuid(), task.getToken());
-            // 仅按引用释放本次 context，避免影响其他任务资源喵~
-            playerBackpackTaskContexts.release(player.getUniqueId(), context);
+            // 仅按引用释放本次 context；context 缺失时释放玩家全部预备资源喵~
+            if (context == null) {
+                playerBackpackTaskContexts.releasePlayer(player.getUniqueId());
+            } else {
+                playerBackpackTaskContexts.release(player.getUniqueId(), context);
+            }
             // 向仍在线玩家报告保守取消喵~
             plugin.getMessageService().sendCancelled(player);
             // 停止后续扫描启动喵~
@@ -338,12 +342,16 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         // 读取并绑定本次任务专属 PlayerBackpack context 喵~
         PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(player.getUniqueId());
         // 喵~防御：context 缺失或归属绑定失败时释放任务，禁止未绑定双域写入喵~
-        if (context != null && !playerBackpackTaskContexts.bind(player.getUniqueId(), context,
+        if (context == null || !playerBackpackTaskContexts.bind(player.getUniqueId(), context,
                 task.getToken(), task.getSessionEpoch())) {
             // 释放刚创建的任务锁喵~
             registry.release(task.getPlayerUuid(), task.getToken());
-            // 按引用释放本次外部 context 喵~
-            playerBackpackTaskContexts.release(player.getUniqueId(), context);
+            // 仅按引用释放本次 context；context 缺失时释放玩家全部预备资源喵~
+            if (context == null) {
+                playerBackpackTaskContexts.releasePlayer(player.getUniqueId());
+            } else {
+                playerBackpackTaskContexts.release(player.getUniqueId(), context);
+            }
             // 通知玩家本次任务取消喵~
             plugin.getMessageService().sendCancelled(player);
             // 终止扫描启动喵~
@@ -401,6 +409,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         BackpackOperationFailure freezeFailure = adapter.saveAndCloseOpenGui(operation);
         // 只有 NONE 表示冻结成功喵~
         if (freezeFailure != BackpackOperationFailure.NONE) {
+            playerBackpackTaskContexts.removePending(player.getUniqueId(), operation);
             adapter.finish(operation);
             plugin.getMessageService().sendCancelled(player);
             return true;
@@ -409,6 +418,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         Bukkit.getScheduler().runTask(plugin, () -> {
             BackpackOperationFailure readinessFailure = adapter.confirmExternalOperationReady(operation);
             if (readinessFailure != BackpackOperationFailure.NONE) {
+                playerBackpackTaskContexts.removePending(player.getUniqueId(), operation);
                 adapter.finish(operation);
                 if (player.isOnline()) {
                     plugin.getMessageService().sendCancelled(player);
@@ -417,6 +427,7 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
             }
             Optional<BackpackSnapshot> snapshotOptional = adapter.loadSnapshot(player.getUniqueId());
             if (snapshotOptional.isEmpty()) {
+                playerBackpackTaskContexts.removePending(player.getUniqueId(), operation);
                 adapter.finish(operation);
                 return;
             }
@@ -465,16 +476,17 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                     begunOperation.set(operation);
                     // 将预备 operation 纳入统一生命周期表，覆盖 context 注册前停服竞态喵~
                     if (!playerBackpackTaskContexts.registerPending(playerId, asyncAdapter, operation)) {
-                        return asyncAdapter.finishOperationAsync(operation)
-                                .thenApply(ignored -> java.util.Optional.<BackpackOperation>empty());
+                        // 让外层统一 cleanup，避免同一 operation 被重复 finish 喵~
+                        return java.util.concurrent.CompletableFuture.completedFuture(
+                                java.util.Optional.<BackpackOperation>empty());
                     }
                     // 异步保存关闭目标 GUI 喵~
                     return asyncAdapter.saveAndCloseOpenGuiAsync(operation).thenCompose(failure -> {
                         // GUI 冻结未成功时释放预约，禁止 load 或 mutation 喵~
                         if (failure != BackpackOperationFailure.NONE) {
-                            // 释放尚未激活或已部分激活的 operation 喵~
-                            return asyncAdapter.finishOperationAsync(operation)
-                                    .thenApply(ignored -> java.util.Optional.<BackpackOperation>empty());
+                            // 让外层统一 cleanup，避免同一 operation 被重复 finish 喵~
+                            return java.util.concurrent.CompletableFuture.completedFuture(
+                                    java.util.Optional.<BackpackOperation>empty());
                         }
                         // 只有 GUI 关闭完成后才允许下一 tick 执行 readiness 与 snapshot 读取喵~
                         return java.util.concurrent.CompletableFuture.completedFuture(java.util.Optional.of(operation));
@@ -508,9 +520,9 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                             .thenCompose(readinessFailure -> {
                                 // readiness 失败时释放 token，禁止读取或写入背包喵~
                                 if (readinessFailure != BackpackOperationFailure.NONE) {
-                                    // 返回空 snapshot，完成回调统一取消喵~
-                                    return asyncAdapter.finishOperationAsync(operation)
-                                            .thenApply(ignored -> java.util.Optional.<BackpackSnapshot>empty());
+                                    // 让外层统一 cleanup，避免同一 operation 被重复 finish 喵~
+                                    return java.util.concurrent.CompletableFuture.completedFuture(
+                                            java.util.Optional.<BackpackSnapshot>empty());
                                 }
                                 // actor load 不访问 Bukkit，快照 DTO 解码由 adapter 投递主线程喵~
                                 return asyncAdapter.loadSnapshotAsync(playerId,
@@ -519,7 +531,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                                 // 喵~防御：插件、玩家、操作或快照任一失效时释放固定 backend 会话喵~
                                 if (!plugin.isEnabled() || snapshotFailure != null || snapshotOptional == null
                                         || snapshotOptional.isEmpty() || !player.isOnline() || player.isDead()) {
-                                    // 尝试释放所有失败出口仍持有的 v2 token 喵~
+                                    // 外层统一 cleanup 负责条件移除 pending 与单次释放喵~
+                                    playerBackpackTaskContexts.removePending(playerId, operation);
                                     asyncAdapter.finishOperationAsync(operation);
                                     // 仅在线玩家接收取消提示喵~
                                     if (player.isOnline()) {
@@ -534,6 +547,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                                         snapshotOptional.get());
                                 // 原子转移 pending operation 与完整 context，避免停服竞态产生资源空窗喵~
                                 if (!playerBackpackTaskContexts.adoptPending(playerId, operation, context)) {
+                                    // 先条件移除 pending，避免关闭后生命周期路径再次释放同一 operation 喵~
+                                    playerBackpackTaskContexts.removePending(playerId, operation);
                                     // 转移失败时关闭未登记 context 并释放 operation 喵~
                                     context.close();
                                     // 结束冲突路径喵~

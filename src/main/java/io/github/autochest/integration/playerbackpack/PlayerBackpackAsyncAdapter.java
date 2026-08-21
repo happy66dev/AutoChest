@@ -274,9 +274,14 @@ public final class PlayerBackpackAsyncAdapter {
                         }
                     });
         } catch (Throwable exception) {
-            // 释放失败记录日志但不抛出到任务清理出口喵~
+            // 释放失败记录日志并向调用方传播，禁止把未知 token 状态伪装成成功喵~
             log(Level.WARNING, "finishOperationAsync", operation.targetId(), exception);
-            return CompletableFuture.completedFuture(null);
+            // 创建异常完成 stage，让上层进入可观测的 reconcile 路径喵~
+            CompletableFuture<Void> failedStage = new CompletableFuture<>();
+            // 发布 provider 同步调用失败喵~
+            failedStage.completeExceptionally(exception);
+            // 返回失败 stage，禁止错误清理本地生命周期状态喵~
+            return failedStage;
         }
     }
 

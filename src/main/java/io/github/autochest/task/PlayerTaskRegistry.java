@@ -125,9 +125,15 @@ public class PlayerTaskRegistry {
      *
      * @param playerUuid 玩家 UUID
      */
-    public void invalidate(UUID playerUuid) {
-        // 递增 session epoch，使当前所有以旧 epoch 创建的任务 isValid 返回 false
+    public synchronized void invalidate(UUID playerUuid) {
+        // 喵~防御：空 UUID 不创建无意义的 session epoch 记录喵~
+        if (playerUuid == null) {
+            return;
+        }
+        // 递增 session epoch，使当前所有以旧 epoch 创建的任务 isValid 返回 false 喵~
         sessionEpochs.computeIfAbsent(playerUuid, k -> new AtomicInteger(0)).incrementAndGet();
+        // 原子移除当前任务，避免玩家重连时旧任务短暂占用 UUID 喵~
+        activeTasks.remove(playerUuid);
     }
 
     /**
@@ -168,7 +174,9 @@ public class PlayerTaskRegistry {
     public void disablePlugin() {
         // 使用极大值确保所有现有任务的 generation 校验均失败
         pluginGeneration = Integer.MAX_VALUE;
+        // 插件禁用时清空 active task 与历史 session epoch，释放长期 UUID 引用喵~
         activeTasks.clear();
+        sessionEpochs.clear();
     }
 
     /**

@@ -77,7 +77,7 @@ public final class PlayerBackpackTaskContexts {
     }
 
     // 仅当引用匹配时移除并幂等释放上下文喵~
-    public void release(UUID playerUuid, PlayerBackpackTaskContext expectedContext) {
+    public synchronized void release(UUID playerUuid, PlayerBackpackTaskContext expectedContext) {
         // 喵~防御：参数为空时不误删其他任务资源喵~
         if (playerUuid == null || expectedContext == null) {
             // 直接返回保持当前映射不变喵~
@@ -113,7 +113,7 @@ public final class PlayerBackpackTaskContexts {
     }
 
     // 移除指定 operation 的预备登记，供成功注册 context 或异常出口调用喵~
-    public void removePending(UUID playerUuid, BackpackOperation operation) {
+    public synchronized void removePending(UUID playerUuid, BackpackOperation operation) {
         // 喵~防御：空参数不触碰其他玩家资源喵~
         if (playerUuid == null || operation == null) {
             return;
@@ -123,7 +123,7 @@ public final class PlayerBackpackTaskContexts {
     }
 
     // 释放指定玩家所有已登记资源，覆盖离线、停服和 provider 撤销喵~
-    public void releasePlayer(UUID playerUuid) {
+    public synchronized void releasePlayer(UUID playerUuid) {
         // 喵~防御：空 UUID 不执行映射操作喵~
         if (playerUuid == null) {
             return;
