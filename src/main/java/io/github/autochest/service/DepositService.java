@@ -388,9 +388,12 @@ public class DepositService {
                         crossStorageCoordinator.depositAsync(context, inventory, containerSlotIndex, logicalSlot,
                                         amount, mainThreadExecutor)
                                 .whenComplete((result, failure) -> Bukkit.getScheduler().runTask(plugin, () -> {
-                                    // 喵~防御：迟到 callback、玩家状态或 context 失效时不得推进 cursor 或统计喵~
+                                    // 喵~防御：迟到 callback、玩家状态、世界或 context 失效时不得推进 cursor 或统计喵~
+                                    Player callbackPlayer = Bukkit.getPlayer(playerTask.getPlayerUuid());
                                     if (!registry.isValid(playerTask) || context != playerBackpackTaskContexts.get(playerTask.getPlayerUuid())
-                                            || !context.isOpen() || failure != null || result == null) {
+                                            || !context.isOpen() || callbackPlayer == null || !callbackPlayer.isOnline()
+                                            || callbackPlayer.isDead() || !callbackPlayer.getWorld().getUID().equals(playerTask.getWorldUuid())
+                                            || failure != null || result == null) {
                                         onDone.onCancelled();
                                         return;
                                     }

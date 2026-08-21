@@ -100,9 +100,14 @@ public final class PlayerBackpackTaskContext implements AutoCloseable {
     public void close() {
         if (closed.compareAndSet(false, true)) {
             if (asyncAdapter != null) {
-                asyncAdapter.finishOperationAsync(operation);
+                // 异步 backend 自身不阻塞主线程，记录释放失败供 provider 日志诊断喵~
+                asyncAdapter.finishOperationAsync(operation)
+                        .whenComplete((ignoredResult, releaseFailure) -> {
+                            // 喵~防御：释放失败不能伪装成已释放，保留错误日志由 adapter 统一记录喵~
+                        });
             } else {
-                adapter.finish(operation);
+                // v1 finish 可能执行 JDBC，必须移出 Bukkit 主线程喵~
+                java.util.concurrent.CompletableFuture.runAsync(() -> adapter.finish(operation));
             }
         }
     }

@@ -112,7 +112,41 @@ public final class PlayerBackpackTaskContexts {
         return pendingOperations.putIfAbsent(playerUuid, PendingOperation.forAsync(asyncAdapter, operation)) == null;
     }
 
-    // 移除指定 operation 的预备登记，供成功注册 context 或异常出口调用喵~
+    // 条件移除 pending 并只由成功取得所有权的一方释放 provider operation 喵~
+    public synchronized boolean releasePending(UUID playerUuid, BackpackOperation operation) {
+        // 喵~防御：空参数不能触碰其他玩家预备资源喵~
+        if (playerUuid == null || operation == null) {
+            return false;
+        }
+        // 读取当前 pending 资源并在同一把锁内条件移除喵~
+        PendingOperation pendingOperation = pendingOperations.get(playerUuid);
+        // 喵~防御：operation 不匹配时不能取得释放所有权喵~
+        if (pendingOperation == null || !pendingOperation.operation().equals(operation)) {
+            return false;
+        }
+        // 只有当前 pending operation 完全匹配时才移除并取得释放所有权喵~
+        pendingOperations.remove(playerUuid, pendingOperation);
+        // 释放已经取得所有权的 provider operation 喵~
+        finishPending(pendingOperation);
+        // 返回本次确实取得释放所有权喵~
+        return true;
+    }
+
+    // 释放 pending 的固定 backend，所有同步 v1 调用都移出 Bukkit 主线程喵~
+    private void finishPending(PendingOperation pendingOperation) {
+        // v1 provider 可能执行 JDBC，使用后台线程释放操作句柄喵~
+        if (pendingOperation.adapter() != null) {
+            java.util.concurrent.CompletableFuture.runAsync(
+                    () -> pendingOperation.adapter().finish(pendingOperation.operation()));
+            return;
+        }
+        // v2 provider 使用自身异步 API，保留 CompletionStage 非阻塞语义喵~
+        if (pendingOperation.asyncAdapter() != null) {
+            pendingOperation.asyncAdapter().finishOperationAsync(pendingOperation.operation());
+        }
+    }
+
+    // 移除指定 operation 的预备登记，供成功注册 context 路径使用喵~
     public synchronized void removePending(UUID playerUuid, BackpackOperation operation) {
         // 喵~防御：空参数不触碰其他玩家资源喵~
         if (playerUuid == null || operation == null) {
@@ -134,16 +168,11 @@ public final class PlayerBackpackTaskContexts {
         if (context != null) {
             context.close();
         }
-        // 原子移除尚未登记的预备 operation 喵~
+        // 有预备 operation 时移除并取得唯一释放所有权喵~
         PendingOperation pendingOperation = pendingOperations.remove(playerUuid);
-        // 有预备 operation 时释放 provider reservation 喵~
+        // 只有移除成功的一方可以向 provider 发送 finish，避免重复释放喵~
         if (pendingOperation != null) {
-            // v1 operation 使用同步 finish，v2 operation 使用异步 finish，保持固定 backend 归属喵~
-            if (pendingOperation.adapter() != null) {
-                pendingOperation.adapter().finish(pendingOperation.operation());
-            } else if (pendingOperation.asyncAdapter() != null) {
-                pendingOperation.asyncAdapter().finishOperationAsync(pendingOperation.operation());
-            }
+            finishPending(pendingOperation);
         }
     }
 

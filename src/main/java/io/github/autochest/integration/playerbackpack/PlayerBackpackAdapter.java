@@ -126,6 +126,12 @@ public final class PlayerBackpackAdapter {
 
     // 应用受 revision 和 before-image 保护的幂等 mutation 喵~
     public BackpackMutationResult applyMutation(BackpackOperation operation, BackpackMutationRequest request) {
+        // 喵~防御：同步 v1 mutation 可能执行 JDBC，禁止 Bukkit 主线程调用喵~
+        if (isBukkitPrimaryThread()) {
+            log(Level.WARNING, "applyMutation", request == null ? null : request.mutationId(),
+                    new IllegalStateException("同步 PlayerBackpack mutation 禁止在 Bukkit 主线程执行喵~"));
+            return failed(BackpackMutationResult.Status.SERVICE_UNAVAILABLE, "禁止主线程同步 mutation 喵~");
+        }
         // 喵~防御：操作句柄和 mutation 请求不能为空喵~
         if (operation == null || request == null) {
             return failed(BackpackMutationResult.Status.SERVICE_UNAVAILABLE, "操作或请求为空喵~");
@@ -140,6 +146,12 @@ public final class PlayerBackpackAdapter {
 
     public BackpackMutationResult prepareMutation(BackpackOperation operation, BackpackMutationRequest request,
                                                    BackpackContainerMutation containerMutation) {
+        // 喵~防御：同步 v1 journal mutation 可能执行 JDBC，禁止 Bukkit 主线程调用喵~
+        if (isBukkitPrimaryThread()) {
+            log(Level.WARNING, "prepareMutation", request == null ? null : request.mutationId(),
+                    new IllegalStateException("同步 PlayerBackpack journal 禁止在 Bukkit 主线程执行喵~"));
+            return failed(BackpackMutationResult.Status.SERVICE_UNAVAILABLE, "禁止主线程同步 journal 喵~");
+        }
         if (operation == null || request == null || containerMutation == null) {
             return failed(BackpackMutationResult.Status.SERVICE_UNAVAILABLE, "journal 准备参数为空喵~");
         }
@@ -154,6 +166,12 @@ public final class PlayerBackpackAdapter {
     }
 
     public BackpackOperationFailure markContainerApplied(BackpackOperation operation, UUID mutationId) {
+        // 喵~防御：同步 v1 journal 状态变更可能执行 JDBC，禁止 Bukkit 主线程调用喵~
+        if (isBukkitPrimaryThread()) {
+            log(Level.WARNING, "markContainerApplied", mutationId,
+                    new IllegalStateException("同步 PlayerBackpack journal 禁止在 Bukkit 主线程执行喵~"));
+            return BackpackOperationFailure.SERVICE_UNAVAILABLE;
+        }
         if (operation == null || mutationId == null) {
             return BackpackOperationFailure.PRECONDITION_FAILED;
         }
@@ -167,6 +185,12 @@ public final class PlayerBackpackAdapter {
 
     public BackpackMutationResult applyCompensation(BackpackOperation operation, UUID originalMutationId,
                                                      BackpackMutationRequest request) {
+        // 喵~防御：同步 v1 compensation 可能执行 JDBC，禁止 Bukkit 主线程调用喵~
+        if (isBukkitPrimaryThread()) {
+            log(Level.WARNING, "applyCompensation", originalMutationId,
+                    new IllegalStateException("同步 PlayerBackpack compensation 禁止在 Bukkit 主线程执行喵~"));
+            return failed(BackpackMutationResult.Status.SERVICE_UNAVAILABLE, "禁止主线程同步 compensation 喵~");
+        }
         if (operation == null || originalMutationId == null || request == null) {
             return failed(BackpackMutationResult.Status.RECONCILIATION_REQUIRED, "补偿参数为空喵~");
         }

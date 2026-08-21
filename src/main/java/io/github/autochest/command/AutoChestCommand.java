@@ -385,69 +385,13 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         }
         // 读取已校验同步 v1 适配器，只在没有 v2 backend 时使用喵~
         PlayerBackpackAdapter adapter = hook == null ? null : hook.adapter();
-        // 不可用时返回 false 让调用方执行原版流程喵~
-        if (adapter == null) {
+        // v1 API 为同步 JDBC 协议，当前命令线程不能安全调用，保守回退原版双域流程喵~
+        if (adapter != null) {
+            plugin.getLogger().warning("[AutoChest] PlayerBackpack v1 仅提供同步 API，已回退原版流程以保护 Bukkit 主线程喵~");
             return false;
         }
-        // 尝试取得当前玩家目标背包独占会话喵~
-        Optional<BackpackOperation> operationOptional = adapter.tryBeginOperation(
-                player.getUniqueId(), player.getUniqueId(), operationType.name().toLowerCase(Locale.ROOT));
-        // 喵~防御：目标繁忙或 provider 异常时 fail-closed 拒绝扩展任务喵~
-        if (operationOptional.isEmpty()) {
-            plugin.getMessageService().sendTaskConflict(player);
-            return true;
-        }
-        // 取得独占操作句柄喵~
-        BackpackOperation operation = operationOptional.get();
-        // 登记 v1 operation，覆盖 freeze 到 context 注册之间的退出与停服竞态喵~
-        if (!playerBackpackTaskContexts.registerPending(player.getUniqueId(), adapter, operation)) {
-            // 登记失败时立即释放 provider operation，禁止孤立 busy token 喵~
-            adapter.finish(operation);
-            plugin.getMessageService().sendTaskConflict(player);
-            return true;
-        }
-        // 保存并关闭所有相关 PlayerBackpack GUI 喵~
-        BackpackOperationFailure freezeFailure = adapter.saveAndCloseOpenGui(operation);
-        // 只有 NONE 表示冻结成功喵~
-        if (freezeFailure != BackpackOperationFailure.NONE) {
-            playerBackpackTaskContexts.removePending(player.getUniqueId(), operation);
-            adapter.finish(operation);
-            plugin.getMessageService().sendCancelled(player);
-            return true;
-        }
-        // 下一 tick 读取关闭 GUI 后的最新 snapshot 喵~
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            BackpackOperationFailure readinessFailure = adapter.confirmExternalOperationReady(operation);
-            if (readinessFailure != BackpackOperationFailure.NONE) {
-                playerBackpackTaskContexts.removePending(player.getUniqueId(), operation);
-                adapter.finish(operation);
-                if (player.isOnline()) {
-                    plugin.getMessageService().sendCancelled(player);
-                }
-                return;
-            }
-            Optional<BackpackSnapshot> snapshotOptional = adapter.loadSnapshot(player.getUniqueId());
-            if (snapshotOptional.isEmpty()) {
-                playerBackpackTaskContexts.removePending(player.getUniqueId(), operation);
-                adapter.finish(operation);
-                return;
-            }
-            PlayerBackpackTaskContext context = new PlayerBackpackTaskContext(
-                    adapter, operation, snapshotOptional.get());
-            // 喵~防御：v1 callback 回来时 context 注册入口可能已关闭或 operation 已被生命周期释放喵~
-            if (!playerBackpackTaskContexts.register(player.getUniqueId(), context)) {
-                // 从 pending 表移除本 operation，避免 releaseAll 重复释放喵~
-                playerBackpackTaskContexts.removePending(player.getUniqueId(), operation);
-                // 关闭未登记 context，幂等释放 provider token 喵~
-                context.close();
-                return;
-            }
-            // v1 context 已接管 operation，移除预备资源登记喵~
-            playerBackpackTaskContexts.removePending(player.getUniqueId(), operation);
-            // 创建后续 AutoChest 任务喵~
-            afterFreeze.run();
-        });
-        return true;
+        // 不可用时返回 false 让调用方执行原版流程喵~
+        return false;
     }
 
     // 使用 v2 async API 保存关闭 GUI、确认 readiness 并在下一 tick 建立固定 backend 会话喵~
@@ -501,10 +445,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                                 ? preparedOperation.get() : begunOperation.get();
                         // 异步阶段已有 operation 时必须释放 token 或 reservation，避免目标永久锁定喵~
                         if (operationToRelease != null) {
-                            // 先移除预备资源登记，避免释放完成后被停服路径再次提交喵~
-                            playerBackpackTaskContexts.removePending(playerId, operationToRelease);
-                            // 释放玩家离线、插件停用或异常完成时遗留的 v2 operation 喵~
-                            asyncAdapter.finishOperationAsync(operationToRelease);
+                            // 仅 pending owner 可释放 v2 operation，避免与生命周期路径双重 finish 喵~
+                            playerBackpackTaskContexts.releasePending(playerId, operationToRelease);
                         }
                         // 仅在线玩家接收保守取消提示喵~
                         if (player.isOnline()) {
@@ -532,9 +474,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                                 // 喵~防御：插件、玩家、操作或快照任一失效时释放固定 backend 会话喵~
                                 if (!plugin.isEnabled() || snapshotFailure != null || snapshotOptional == null
                                         || snapshotOptional.isEmpty() || !player.isOnline() || player.isDead()) {
-                                    // 外层统一 cleanup 负责条件移除 pending 与单次释放喵~
-                                    playerBackpackTaskContexts.removePending(playerId, operation);
-                                    asyncAdapter.finishOperationAsync(operation);
+                                    // 快照失败时只让 pending owner 执行一次 v2 finish 喵~
+                                    playerBackpackTaskContexts.releasePending(playerId, operation);
                                     // 仅在线玩家接收取消提示喵~
                                     if (player.isOnline()) {
                                         // 提示异步快照未建立喵~
