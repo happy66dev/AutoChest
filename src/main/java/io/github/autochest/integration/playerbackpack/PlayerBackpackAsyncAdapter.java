@@ -2,6 +2,12 @@ package io.github.autochest.integration.playerbackpack;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+// 导入内存字节输入流以读取 PlayerBackpack 的 Java 对象流 BLOB 喵~
+import java.io.ByteArrayInputStream;
+// 导入内存字节输出流以构造 PlayerBackpack 兼容 BLOB 喵~
+import java.io.ByteArrayOutputStream;
+// 导入输入输出异常以拒绝损坏或不可序列化物品喵~
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -12,6 +18,10 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+// 导入 Bukkit 对象输入流以读取 PlayerBackpack 已持久化的物品 BLOB 喵~
+import org.bukkit.util.io.BukkitObjectInputStream;
+// 导入 Bukkit 对象输出流以生成 PlayerBackpack 可读取的物品 BLOB 喵~
+import org.bukkit.util.io.BukkitObjectOutputStream;
 import org.bukkit.inventory.ItemStack;
 
 // 通过反射连接 PlayerBackpack v2，避免 AutoChest 静态链接可选插件类型喵~
@@ -338,18 +348,44 @@ public final class PlayerBackpackAsyncAdapter {
         long revision = ((Number) property(nativeSnapshot, "revision")).longValue();
         Object nativeItems = property(nativeSnapshot, "items");
         Map<Integer, ItemStack> items = new HashMap<>();
-        // 逐项解码 BLOB，非法条目直接令整个快照失败喵~
+        // 逐项解码 PlayerBackpack 定义的对象流 BLOB，非法条目令整个快照失败喵~
         if (nativeItems instanceof Map<?, ?> itemMap) {
             for (Map.Entry<?, ?> entry : itemMap.entrySet()) {
+                // 喵~防御：槽位与 payload 类型不完整时拒绝构造可能丢失物品的快照喵~
                 if (!(entry.getKey() instanceof Number slot) || entry.getValue() == null) {
-                    continue;
+                    throw new IllegalArgumentException("PlayerBackpack 快照含无效物品条目喵~");
                 }
+                // 读取 provider 防御复制后的单个物品 BLOB 喵~
                 byte[] payload = (byte[]) property(entry.getValue(), "bytes");
-                items.put(slot.intValue(), ItemStack.deserializeBytes(payload));
+                // 使用 PlayerBackpack 持久化格式解码，禁止误将 Java 对象流交给 Paper NBT 解码器喵~
+                items.put(slot.intValue(), decodePlayerBackpackItem(payload));
             }
         }
         // 使用本地快照构造器执行槽位与数量校验喵~
         return new BackpackSnapshot(playerId, capacity, revision, new java.util.TreeMap<>(items));
+    }
+
+    // 将 PlayerBackpack 定义的 BukkitObjectOutputStream BLOB 解码为独立物品副本喵~
+    private ItemStack decodePlayerBackpackItem(byte[] itemBytes) {
+        // 喵~防御：空 BLOB 没有合法物品语义，禁止伪造空槽继续跨域操作喵~
+        if (itemBytes == null || itemBytes.length == 0) {
+            throw new IllegalArgumentException("PlayerBackpack 物品 BLOB 为空喵~");
+        }
+        // 创建对象输入流以匹配 PlayerBackpack ItemStackCodec 的稳定存储格式喵~
+        try (ByteArrayInputStream byteInput = new ByteArrayInputStream(itemBytes);
+             BukkitObjectInputStream objectInput = new BukkitObjectInputStream(byteInput)) {
+            // 读取 PlayerBackpack 序列化的 Bukkit 物品对象喵~
+            Object decodedObject = objectInput.readObject();
+            // 喵~防御：仅非空 ItemStack 可作为跨插件快照内容喵~
+            if (!(decodedObject instanceof ItemStack itemStack) || itemStack.isEmpty()) {
+                throw new IllegalArgumentException("PlayerBackpack 物品 BLOB 类型错误或为空喵~");
+            }
+            // 返回独立副本，避免 provider DTO 或缓存对象被后续流程改写喵~
+            return itemStack.clone();
+        } catch (IOException | ClassNotFoundException exception) {
+            // 喵~防御：损坏或非 PlayerBackpack 格式数据必须终止操作，防止物品守恒被破坏喵~
+            throw new IllegalArgumentException("PlayerBackpack 物品 BLOB 解码失败喵~", exception);
+        }
     }
 
     // 将本地 mutation 请求编码为 v2 BLOB DTO 喵~
@@ -390,12 +426,34 @@ public final class PlayerBackpackAsyncAdapter {
     // 将 Bukkit ItemStack 编码为 v2 BLOB ItemPayload 喵~
     private Object toNativeItem(ItemStack item, Class<?> itemClass) throws ReflectiveOperationException {
         // 空槽保持 null，不制造伪造物品喵~
-        if (item == null) {
+        if (item == null || item.isEmpty()) {
             return null;
         }
-        // 调用 Bukkit 序列化，必须在主线程执行喵~
+        // 加载 v2 ItemPayload 的稳定单参数构造器喵~
         Constructor<?> constructor = constructor(itemClass.getName(), itemClass, byte[].class);
-        return constructor.newInstance((Object) item.serializeAsBytes());
+        // 使用 PlayerBackpack 的对象流格式编码，确保 actor 写入后 legacy codec 仍可读取喵~
+        return constructor.newInstance((Object) encodePlayerBackpackItem(item));
+    }
+
+    // 将 Bukkit 物品编码为 PlayerBackpack ItemStackCodec 兼容的 Bukkit 对象流 BLOB 喵~
+    private byte[] encodePlayerBackpackItem(ItemStack itemStack) {
+        // 喵~防御：空物品不能作为有效 mutation 镜像写入 journal 或数据库喵~
+        if (itemStack == null || itemStack.isEmpty()) {
+            throw new IllegalArgumentException("PlayerBackpack 不能编码空物品喵~");
+        }
+        // 创建内存缓冲区和 Bukkit 对象输出流以匹配 provider 的历史存储格式喵~
+        try (ByteArrayOutputStream byteOutput = new ByteArrayOutputStream();
+             BukkitObjectOutputStream objectOutput = new BukkitObjectOutputStream(byteOutput)) {
+            // 写入独立物品副本，防止序列化期间外部库存变动改变镜像喵~
+            objectOutput.writeObject(itemStack.clone());
+            // 刷新对象流确保所有字节都进入 payload 缓冲区喵~
+            objectOutput.flush();
+            // 返回给反射 DTO 构造器的稳定 BLOB 喵~
+            return byteOutput.toByteArray();
+        } catch (IOException exception) {
+            // 喵~防御：编码失败时阻止建立不完整 journal，避免跨域写入失去 before-image 喵~
+            throw new IllegalArgumentException("PlayerBackpack 物品 BLOB 编码失败喵~", exception);
+        }
     }
 
     // 将 v2 mutation 结果 DTO 转成本地纯结果喵~
