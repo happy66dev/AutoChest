@@ -436,8 +436,8 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                         // 只有 GUI 关闭完成后才允许下一 tick 执行 readiness 与 snapshot 读取喵~
                         return java.util.concurrent.CompletableFuture.completedFuture(java.util.Optional.of(operation));
                     });
-                }).whenComplete((preparedOperation, failure) -> Bukkit.getScheduler().runTask(plugin, () -> {
-                    // 喵~防御：插件停用、玩家离线或异步失败时不得创建后继任务喵~
+                }).whenComplete((preparedOperation, failure) -> scheduleMainIfEnabled(() -> {
+                    // 喵~防御：插件停用后不再创建 Bukkit scheduler 任务喵~
                     if (!plugin.isEnabled() || failure != null || preparedOperation == null || preparedOperation.isEmpty()
                             || !player.isOnline() || player.isDead()) {
                         // 异常 stage 可能丢失 Optional，使用外层引用释放已经预约的 operation 喵~
@@ -498,6 +498,16 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                                 afterFreeze.run();
                             })));
                 }));
+    }
+
+    // 只在插件仍启用时向 Bukkit 主线程提交 callback，避免停服后的 IllegalPluginAccessException 喵~
+    private void scheduleMainIfEnabled(Runnable callback) {
+        // 喵~防御：空 callback 或停用插件不能进入 Bukkit scheduler 喵~
+        if (callback == null || !plugin.isEnabled()) {
+            return;
+        }
+        // 在主线程继续执行异步结果的 Bukkit 状态重验喵~
+        Bukkit.getScheduler().runTask(plugin, callback);
     }
 
     // ===== player container preferences =====

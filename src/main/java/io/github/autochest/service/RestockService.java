@@ -518,7 +518,12 @@ public class RestockService {
                         int nextContainerSlotIndex = currentContainerSlotIndex;
                         crossStorageCoordinator.restockAsync(context, inventory, currentContainerSlotIndex, logicalSlot,
                                         amount, mainThreadExecutor)
-                                .whenComplete((result, failure) -> Bukkit.getScheduler().runTask(plugin, () -> {
+                                .whenComplete((result, failure) -> {
+                                    // 喵~防御：插件停用后不再提交 Bukkit scheduler，避免迟到 callback 抛异常喵~
+                                    if (!plugin.isEnabled()) {
+                                        return;
+                                    }
+                                    Bukkit.getScheduler().runTask(plugin, () -> {
                                     // 喵~防御：迟到 callback、停用、玩家切换世界或 context 替换时立即取消喵~
                                     Player callbackPlayer = Bukkit.getPlayer(playerTask.getPlayerUuid());
                                     if (!registry.isValid(playerTask) || context != playerBackpackTaskContexts.get(playerTask.getPlayerUuid())
@@ -564,7 +569,8 @@ public class RestockService {
                                     }
                                     // journal 或两域状态不确定时不再执行后续 mutation 喵~
                                     onDone.onCancelled();
-                                }));
+                                });
+                                });
                         return;
                     }
                     // v1 backend 保持已有同步兼容路径喵~
