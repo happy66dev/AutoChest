@@ -202,16 +202,18 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
 
         // 若可用则先冻结 PlayerBackpack GUI、取得独占会话并在下一 tick 建立快照。
         if (beginPlayerBackpackThenNextTick(player, OperationType.DEPOSIT,
-                () -> beginDepositTask(player, preferencesSnapshot))) {
+                () -> beginDepositTask(player, preferencesSnapshot, true))) {
             // 已开始跨域预备流程，后续由回调创建 AutoChest 任务喵~
             return;
         }
-        // PlayerBackpack 不可用时保持现有原版存入流程喵~
-        beginDepositTask(player, preferencesSnapshot);
+        // PlayerBackpack 不可用时保持现有原版存入流程，且不要求任何跨域 context 喵~
+        beginDepositTask(player, preferencesSnapshot, false);
     }
 
     // 在 PlayerBackpack 预备完成后创建原版存入任务并启动扫描喵~
-    private void beginDepositTask(Player player, OperationPreferencesSnapshot preferencesSnapshot) {
+    // requiresBackpackContext 为 true 表示本次确实走过 v2 跨域预备，必须绑定 context 才能安全写入两侧喵~
+    private void beginDepositTask(Player player, OperationPreferencesSnapshot preferencesSnapshot,
+                                  boolean requiresBackpackContext) {
         // 喵~防御：下一 tick 回调执行时玩家可能已离线、死亡或切换状态喵~
         if (player == null || !player.isOnline() || player.isDead()) {
             // 释放预备阶段已经登记的 PlayerBackpack 会话喵~
@@ -235,11 +237,13 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         }
         // 取得已注册的 AutoChest 任务喵~
         PlayerTask task = taskOpt.get();
-        // 读取当前预备阶段注册的 PlayerBackpack context 喵~
+        // 读取当前预备阶段注册的 PlayerBackpack context，原版路径通常为空喵~
         PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(player.getUniqueId());
-        // 喵~防御：跨域 context 缺失或不属于本次 task 时立即释放，禁止孤立 operation 继续喵~
-        if (context == null || !playerBackpackTaskContexts.bind(player.getUniqueId(), context,
-                task.getToken(), task.getSessionEpoch())) {
+        // 已存在 context 时尝试绑定到本次任务，绑定成功后其释放时机随任务结束喵~
+        boolean contextBound = context != null && playerBackpackTaskContexts.bind(player.getUniqueId(), context,
+                task.getToken(), task.getSessionEpoch());
+        // 喵~防御：只有真正走过跨域预备的流程才要求 context，避免无 PlayerBackpack 时取消原版存入喵~
+        if (shouldCancelForMissingContext(requiresBackpackContext, contextBound)) {
             // 释放刚创建但尚未执行的 AutoChest task 喵~
             registry.release(task.getPlayerUuid(), task.getToken());
             // 仅按引用释放本次 context；context 缺失时释放玩家全部预备资源喵~
@@ -252,6 +256,11 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
             plugin.getMessageService().sendCancelled(player);
             // 停止后续扫描启动喵~
             return;
+        }
+        // 喵~防御：原版路径残留无法绑定的 context 时立即释放，避免 provider operation 永久占用喵~
+        if (shouldReleaseUnboundContext(requiresBackpackContext, context != null, contextBound)) {
+            // 按引用条件释放，绝不误删其他任务已绑定资源喵~
+            playerBackpackTaskContexts.release(player.getUniqueId(), context);
         }
         // 命令真正接受后消费冷却喵~
         cooldownService.record(player.getUniqueId(), CooldownService.OperationType.DEPOSIT);
@@ -304,18 +313,21 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
 
         // 可用时先冻结 PlayerBackpack GUI，再在下一 tick 同步建立双域白名单。
         if (beginPlayerBackpackThenNextTick(player, OperationType.RESTOCK,
-                () -> beginRestockTask(player, new RestockTargetWhitelist(player, preferencesSnapshot), preferencesSnapshot))) {
+                () -> beginRestockTask(player, new RestockTargetWhitelist(player, preferencesSnapshot),
+                        preferencesSnapshot, true))) {
             // 预备流程已异步接管任务创建喵~
             return;
         }
 
-        // PlayerBackpack 不可用时在命令 tick 建立原版白名单并保持原有流程喵~
-        beginRestockTask(player, new RestockTargetWhitelist(player, preferencesSnapshot), preferencesSnapshot);
+        // PlayerBackpack 不可用时在命令 tick 建立原版白名单并保持原有流程，不要求跨域 context 喵~
+        beginRestockTask(player, new RestockTargetWhitelist(player, preferencesSnapshot), preferencesSnapshot, false);
     }
 
     // 在预备阶段完成后创建原版补货任务喵~
+    // requiresBackpackContext 为 true 表示本次确实走过 v2 跨域预备，必须绑定 context 才能安全写入两侧喵~
     private void beginRestockTask(Player player, RestockTargetWhitelist whitelist,
-                                  OperationPreferencesSnapshot preferencesSnapshot) {
+                                  OperationPreferencesSnapshot preferencesSnapshot,
+                                  boolean requiresBackpackContext) {
         // 喵~防御：玩家离线、死亡或白名单缺失时不创建任务喵~
         if (player == null || whitelist == null || preferencesSnapshot == null
                 || !player.isOnline() || player.isDead()) {
@@ -340,11 +352,13 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
         }
         // 取得已注册任务喵~
         PlayerTask task = taskOpt.get();
-        // 读取并绑定本次任务专属 PlayerBackpack context 喵~
+        // 读取本次任务专属 PlayerBackpack context，原版路径通常为空喵~
         PlayerBackpackTaskContext context = playerBackpackTaskContexts.get(player.getUniqueId());
-        // 喵~防御：context 缺失或归属绑定失败时释放任务，禁止未绑定双域写入喵~
-        if (context == null || !playerBackpackTaskContexts.bind(player.getUniqueId(), context,
-                task.getToken(), task.getSessionEpoch())) {
+        // 已存在 context 时尝试绑定到本次任务，绑定成功后其释放时机随任务结束喵~
+        boolean contextBound = context != null && playerBackpackTaskContexts.bind(player.getUniqueId(), context,
+                task.getToken(), task.getSessionEpoch());
+        // 喵~防御：只有真正走过跨域预备的流程才要求 context，避免无 PlayerBackpack 时取消原版补货喵~
+        if (shouldCancelForMissingContext(requiresBackpackContext, contextBound)) {
             // 释放刚创建的任务锁喵~
             registry.release(task.getPlayerUuid(), task.getToken());
             // 仅按引用释放本次 context；context 缺失时释放玩家全部预备资源喵~
@@ -357,6 +371,11 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
             plugin.getMessageService().sendCancelled(player);
             // 终止扫描启动喵~
             return;
+        }
+        // 喵~防御：原版路径残留无法绑定的 context 时立即释放，避免 provider operation 永久占用喵~
+        if (shouldReleaseUnboundContext(requiresBackpackContext, context != null, contextBound)) {
+            // 按引用条件释放，绝不误删其他任务已绑定资源喵~
+            playerBackpackTaskContexts.release(player.getUniqueId(), context);
         }
         // 命令接受后消费冷却喵~
         cooldownService.record(player.getUniqueId(), CooldownService.OperationType.RESTOCK);
@@ -549,6 +568,23 @@ public class AutoChestCommand implements CommandExecutor, TabCompleter {
                             });
                     });
                 }));
+    }
+
+    // 判断缺少可绑定 context 时是否必须取消任务喵~
+    // 输入：requiresBackpackContext-本次是否走过 v2 跨域预备；contextBound-context 是否已成功绑定本次任务
+    // 输出：true 表示必须 fail-closed 取消，false 表示可安全继续纯原版流程
+    static boolean shouldCancelForMissingContext(boolean requiresBackpackContext, boolean contextBound) {
+        // 只有跨域预备已经改动 PlayerBackpack 状态时，缺少绑定才构成不可继续的危险喵~
+        return requiresBackpackContext && !contextBound;
+    }
+
+    // 判断原版路径是否需要释放残留且无法绑定的 context，避免 provider operation 永久占用喵~
+    // 输入：requiresBackpackContext-本次是否走过 v2 跨域预备；contextPresent-是否存在 context；contextBound-是否绑定成功
+    // 输出：true 表示应按引用条件释放该 context
+    static boolean shouldReleaseUnboundContext(boolean requiresBackpackContext, boolean contextPresent,
+                                              boolean contextBound) {
+        // 仅原版路径出现的孤立未绑定 context 需要主动回收，已绑定资源交由任务结束释放喵~
+        return !requiresBackpackContext && contextPresent && !contextBound;
     }
 
     // 判断异步预备链仍对应发起命令时的玩家生命周期与世界，防止迟到 callback 在新状态创建任务喵~
